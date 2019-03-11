@@ -39,12 +39,36 @@
                 'schema': 'Database'
             }
         },
+        jenkins: {
+          hidden_fields: ['schema'],
+          relabeling: {
+            'login': 'Username',
+            'password': 'API token or password',
+            'extra': 'Use https (true/false, default false)'
+          }
+        },
         docker: {
             hidden_fields: ['port', 'schema'],
             relabeling: {
                 'host': 'Registry URL',
                 'login': 'Username',
-            },
+            }
+        },
+        qubole: {
+          hidden_fields: ['login', 'schema', 'port', 'extra'],
+          relabeling: {
+            'host': 'API Endpoint',
+            'password': 'Auth Token',
+          },
+          placeholders: {
+            'host': 'https://<env>.qubole.com/api'
+          }
+        },
+        ssh: {
+          hidden_fields: ['schema'],
+          relabeling: {
+            'login': 'Username',
+          }
         },
       }
       function connTypeChange(connectionType) {
@@ -60,6 +84,8 @@
         $("label[orig_text]").each(function(){
             $(this).text($(this).attr("orig_text"));
         });
+        $(".form-control").each(function(){$(this).attr('placeholder', '')});
+
         if (config[connectionType] != undefined){
           $.each(config[connectionType].hidden_fields, function(i, field){
             $("#" + field).parent().parent().addClass('hide')
@@ -68,6 +94,9 @@
             lbl = $("label[for='" + k + "']")
             lbl.attr("orig_text", lbl.text());
             $("label[for='" + k + "']").text(v);
+          });
+          $.each(config[connectionType].placeholders, function(k, v){
+            $("#" + k).attr('placeholder', v);
           });
         }
       }

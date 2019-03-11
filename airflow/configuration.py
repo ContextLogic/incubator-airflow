@@ -1,44 +1,47 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+from builtins import str
+from collections import OrderedDict
 import copy
 import errno
-import os
-import six
-import subprocess
-import warnings
-import shlex
-import sys
-
 from future import standard_library
-
+import os
+import shlex
+import six
 from six import iteritems
+import subprocess
+import sys
+import warnings
 
+from backports.configparser import ConfigParser, _UNSET, NoOptionError
+from zope.deprecation import deprecated as _deprecated
+
+from airflow.exceptions import AirflowConfigException
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 standard_library.install_aliases()
-
-from builtins import str
-from collections import OrderedDict
-from six.moves import configparser
-
-from airflow.exceptions import AirflowConfigException
 
 log = LoggingMixin().log
 
@@ -48,22 +51,14 @@ warnings.filterwarnings(
 warnings.filterwarnings(
     action='default', category=PendingDeprecationWarning, module='airflow')
 
-if six.PY3:
-    ConfigParser = configparser.ConfigParser
-else:
-    ConfigParser = configparser.SafeConfigParser
-
 
 def generate_fernet_key():
     try:
         from cryptography.fernet import Fernet
     except ImportError:
-        pass
-    try:
-        key = Fernet.generate_key().decode()
-    except NameError:
-        key = "cryptography_not_found_storing_passwords_in_plain_text"
-    return key
+        return ''
+    else:
+        return Fernet.generate_key().decode()
 
 
 def expand_env_var(env_var):
@@ -102,11 +97,21 @@ def run_command(command):
 
     return output
 
-_templates_dir = os.path.join(os.path.dirname(__file__), 'config_templates')
-with open(os.path.join(_templates_dir, 'default_airflow.cfg')) as f:
-    DEFAULT_CONFIG = f.read()
-with open(os.path.join(_templates_dir, 'default_test.cfg')) as f:
-    TEST_CONFIG = f.read()
+
+def _read_default_config_file(file_name):
+    templates_dir = os.path.join(os.path.dirname(__file__), 'config_templates')
+    file_path = os.path.join(templates_dir, file_name)
+    if six.PY2:
+        with open(file_path) as f:
+            config = f.read()
+            return config.decode('utf-8')
+    else:
+        with open(file_path, encoding='utf-8') as f:
+            return f.read()
+
+
+DEFAULT_CONFIG = _read_default_config_file('default_airflow.cfg')
+TEST_CONFIG = _read_default_config_file('default_test.cfg')
 
 
 class AirflowConfigParser(ConfigParser):
@@ -118,28 +123,55 @@ class AirflowConfigParser(ConfigParser):
         ('core', 'sql_alchemy_conn'),
         ('core', 'fernet_key'),
         ('celery', 'broker_url'),
-        ('celery', 'result_backend')
+        ('celery', 'result_backend'),
+        # Todo: remove this in Airflow 1.11
+        ('celery', 'celery_result_backend'),
+        ('atlas', 'password'),
+        ('smtp', 'smtp_password'),
+        ('ldap', 'bind_password'),
+        ('kubernetes', 'git_password'),
     }
 
-    def __init__(self, *args, **kwargs):
-        ConfigParser.__init__(self, *args, **kwargs)
-        self.read_string(parameterized_config(DEFAULT_CONFIG))
+    # A two-level mapping of (section -> new_name -> old_name). When reading
+    # new_name, the old_name will be checked to see if it exists. If it does a
+    # DeprecationWarning will be issued and the old name will be used instead
+    deprecated_options = {
+        'celery': {
+            # Remove these keys in Airflow 1.11
+            'worker_concurrency': 'celeryd_concurrency',
+            'result_backend': 'celery_result_backend',
+            'broker_url': 'celery_broker_url',
+            'ssl_active': 'celery_ssl_active',
+            'ssl_cert': 'celery_ssl_cert',
+            'ssl_key': 'celery_ssl_key',
+        }
+    }
+    deprecation_format_string = (
+        'The {old} option in [{section}] has been renamed to {new} - the old '
+        'setting has been used, but please update your config.'
+    )
+
+    # A mapping of old default values that we want to change and warn the user
+    # about. Mapping of section -> setting -> { old, replace, by_version }
+    deprecated_values = {
+        'core': {
+            'task_runner': ('BashTaskRunner', 'StandardTaskRunner', '2.0'),
+        },
+    }
+    deprecation_value_format_string = (
+        'The {name} setting in [{section}] has the old default value of {old!r}. This '
+        'value has been changed to {new!r} in the running config, but please '
+        'update your config before Apache Airflow {version}.'
+    )
+
+    def __init__(self, default_config=None, *args, **kwargs):
+        super(AirflowConfigParser, self).__init__(*args, **kwargs)
+
+        self.airflow_defaults = ConfigParser(*args, **kwargs)
+        if default_config is not None:
+            self.airflow_defaults.read_string(default_config)
+
         self.is_validated = False
-
-    def read_string(self, string, source='<string>'):
-        """
-        Read configuration from a string.
-
-        A backwards-compatible version of the ConfigParser.read_string()
-        method that was introduced in Python 3.
-        """
-        # Python 3 added read_string() method
-        if six.PY3:
-            ConfigParser.read_string(self, string, source=source)
-        # Python 2 requires StringIO buffer
-        else:
-            import StringIO
-            self.readfp(StringIO.StringIO(string))
 
     def _validate(self):
         if (
@@ -167,44 +199,88 @@ class AirflowConfigParser(ConfigParser):
                 "error: attempt at using ldapgroup "
                 "filtering without using the Ldap backend")
 
+        for section, replacement in self.deprecated_values.items():
+            for name, info in replacement.items():
+                old, new, version = info
+                if self.get(section, name, fallback=None) == old:
+                    # Make sure the env var option is removed, otherwise it
+                    # would be read and used instead of the value we set
+                    env_var = self._env_var_name(section, name)
+                    os.environ.pop(env_var, None)
+
+                    self.set(section, name, new)
+                    warnings.warn(
+                        self.deprecation_value_format_string.format(**locals()),
+                        FutureWarning,
+                    )
+
         self.is_validated = True
+
+    @staticmethod
+    def _env_var_name(section, key):
+        return 'AIRFLOW__{S}__{K}'.format(S=section.upper(), K=key.upper())
 
     def _get_env_var_option(self, section, key):
         # must have format AIRFLOW__{SECTION}__{KEY} (note double underscore)
-        env_var = 'AIRFLOW__{S}__{K}'.format(S=section.upper(), K=key.upper())
+        env_var = self._env_var_name(section, key)
         if env_var in os.environ:
             return expand_env_var(os.environ[env_var])
 
     def _get_cmd_option(self, section, key):
         fallback_key = key + '_cmd'
         # if this is a valid command key...
-        if (section, key) in AirflowConfigParser.as_command_stdout:
-            # if the original key is present, return it no matter what
-            if self.has_option(section, key):
-                return ConfigParser.get(self, section, key)
-            # otherwise, execute the fallback key
-            elif self.has_option(section, fallback_key):
-                command = self.get(section, fallback_key)
+        if (section, key) in self.as_command_stdout:
+            if super(AirflowConfigParser, self) \
+                    .has_option(section, fallback_key):
+                command = super(AirflowConfigParser, self) \
+                    .get(section, fallback_key)
                 return run_command(command)
 
     def get(self, section, key, **kwargs):
         section = str(section).lower()
         key = str(key).lower()
 
+        deprecated_name = self.deprecated_options.get(section, {}).get(key, None)
+
         # first check environment variables
         option = self._get_env_var_option(section, key)
         if option is not None:
             return option
+        if deprecated_name:
+            option = self._get_env_var_option(section, deprecated_name)
+            if option is not None:
+                self._warn_deprecate(section, key, deprecated_name)
+                return option
 
         # ...then the config file
-        if self.has_option(section, key):
+        if super(AirflowConfigParser, self).has_option(section, key):
+            # Use the parent's methods to get the actual config here to be able to
+            # separate the config from default config.
             return expand_env_var(
-                ConfigParser.get(self, section, key, **kwargs))
+                super(AirflowConfigParser, self).get(section, key, **kwargs))
+        if deprecated_name:
+            if super(AirflowConfigParser, self).has_option(section, deprecated_name):
+                self._warn_deprecate(section, key, deprecated_name)
+                return expand_env_var(super(AirflowConfigParser, self).get(
+                    section,
+                    deprecated_name,
+                    **kwargs
+                ))
 
         # ...then commands
         option = self._get_cmd_option(section, key)
         if option:
             return option
+        if deprecated_name:
+            option = self._get_cmd_option(section, deprecated_name)
+            if option:
+                self._warn_deprecate(section, key, deprecated_name)
+                return option
+
+        # ...then the default config
+        if self.airflow_defaults.has_option(section, key) or 'fallback' in kwargs:
+            return expand_env_var(
+                self.airflow_defaults.get(section, key, **kwargs))
 
         else:
             log.warning(
@@ -215,28 +291,54 @@ class AirflowConfigParser(ConfigParser):
                 "section/key [{section}/{key}] not found "
                 "in config".format(**locals()))
 
-    def getboolean(self, section, key):
-        val = str(self.get(section, key)).lower().strip()
+    def getboolean(self, section, key, **kwargs):
+        val = str(self.get(section, key, **kwargs)).lower().strip()
         if '#' in val:
             val = val.split('#')[0].strip()
-        if val.lower() in ('t', 'true', '1'):
+        if val in ('t', 'true', '1'):
             return True
-        elif val.lower() in ('f', 'false', '0'):
+        elif val in ('f', 'false', '0'):
             return False
         else:
             raise AirflowConfigException(
                 'The value for configuration option "{}:{}" is not a '
                 'boolean (received "{}").'.format(section, key, val))
 
-    def getint(self, section, key):
-        return int(self.get(section, key))
+    def getint(self, section, key, **kwargs):
+        return int(self.get(section, key, **kwargs))
 
-    def getfloat(self, section, key):
-        return float(self.get(section, key))
+    def getfloat(self, section, key, **kwargs):
+        return float(self.get(section, key, **kwargs))
 
-    def read(self, filenames):
-        ConfigParser.read(self, filenames)
+    def read(self, filenames, **kwargs):
+        super(AirflowConfigParser, self).read(filenames, **kwargs)
         self._validate()
+
+    def read_dict(self, *args, **kwargs):
+        super(AirflowConfigParser, self).read_dict(*args, **kwargs)
+        self._validate()
+
+    def has_option(self, section, option):
+        try:
+            # Using self.get() to avoid reimplementing the priority order
+            # of config variables (env, config, cmd, defaults)
+            # UNSET to avoid logging a warning about missing values
+            self.get(section, option, fallback=_UNSET)
+            return True
+        except NoOptionError:
+            return False
+
+    def remove_option(self, section, option, remove_default=True):
+        """
+        Remove an option if it exists in config from a file or
+        default config. If both of config have the same option, this removes
+        the option in both configs unless remove_default=False.
+        """
+        if super(AirflowConfigParser, self).has_option(section, option):
+            super(AirflowConfigParser, self).remove_option(section, option)
+
+        if self.airflow_defaults.has_option(section, option) and remove_default:
+            self.airflow_defaults.remove_option(section, option)
 
     def getsection(self, section):
         """
@@ -245,47 +347,64 @@ class AirflowConfigParser(ConfigParser):
         :param section: section from the config
         :return: dict
         """
+        if (section not in self._sections and
+                section not in self.airflow_defaults._sections):
+            return None
+
+        _section = copy.deepcopy(self.airflow_defaults._sections[section])
+
         if section in self._sections:
-            _section = self._sections[section]
-            for key, val in iteritems(self._sections[section]):
+            _section.update(copy.deepcopy(self._sections[section]))
+
+        section_prefix = 'AIRFLOW__{S}__'.format(S=section.upper())
+        for env_var in sorted(os.environ.keys()):
+            if env_var.startswith(section_prefix):
+                key = env_var.replace(section_prefix, '').lower()
+                _section[key] = self._get_env_var_option(section, key)
+
+        for key, val in iteritems(_section):
+            try:
+                val = int(val)
+            except ValueError:
                 try:
-                    val = int(val)
+                    val = float(val)
                 except ValueError:
-                    try:
-                        val = float(val)
-                    except ValueError:
-                        if val.lower() in ('t', 'true'):
-                            val = True
-                        elif val.lower() in ('f', 'false'):
-                            val = False
-                _section[key] = val
-            return _section
+                    if val.lower() in ('t', 'true'):
+                        val = True
+                    elif val.lower() in ('f', 'false'):
+                        val = False
+            _section[key] = val
+        return _section
 
-        return None
-
-    def as_dict(self, display_source=False, display_sensitive=False):
+    def as_dict(
+            self, display_source=False, display_sensitive=False, raw=False):
         """
         Returns the current configuration as an OrderedDict of OrderedDicts.
         :param display_source: If False, the option value is returned. If True,
             a tuple of (option_value, source) is returned. Source is either
-            'airflow.cfg' or 'default'.
+            'airflow.cfg', 'default', 'env var', or 'cmd'.
         :type display_source: bool
         :param display_sensitive: If True, the values of options set by env
             vars and bash commands will be displayed. If False, those options
             are shown as '< hidden >'
         :type display_sensitive: bool
+        :param raw: Should the values be output as interpolated values, or the
+            "raw" form that can be fed back in to ConfigParser
+        :type raw: bool
         """
-        cfg = copy.deepcopy(self._sections)
+        cfg = {}
+        configs = [
+            ('default', self.airflow_defaults),
+            ('airflow.cfg', self),
+        ]
 
-        # remove __name__ (affects Python 2 only)
-        for options in cfg.values():
-            options.pop('__name__', None)
-
-        # add source
-        if display_source:
-            for section in cfg:
-                for k, v in cfg[section].items():
-                    cfg[section][k] = (v, 'airflow config')
+        for (source_name, config) in configs:
+            for section in config.sections():
+                sect = cfg.setdefault(section, OrderedDict())
+                for (k, val) in config.items(section=section, raw=raw):
+                    if display_source:
+                        val = (val, source_name)
+                    sect[k] = val
 
         # add env vars and overwrite because they have priority
         for ev in [ev for ev in os.environ if ev.startswith('AIRFLOW__')]:
@@ -293,26 +412,28 @@ class AirflowConfigParser(ConfigParser):
                 _, section, key = ev.split('__')
                 opt = self._get_env_var_option(section, key)
             except ValueError:
-                opt = None
-            if opt:
-                if (
-                        not display_sensitive
-                        and ev != 'AIRFLOW__CORE__UNIT_TEST_MODE'):
-                    opt = '< hidden >'
-                if display_source:
-                    opt = (opt, 'env var')
-                cfg.setdefault(section.lower(), OrderedDict()).update(
-                    {key.lower(): opt})
+                continue
+            if (not display_sensitive and ev != 'AIRFLOW__CORE__UNIT_TEST_MODE'):
+                opt = '< hidden >'
+            elif raw:
+                opt = opt.replace('%', '%%')
+            if display_source:
+                opt = (opt, 'env var')
+            cfg.setdefault(section.lower(), OrderedDict()).update(
+                {key.lower(): opt})
 
         # add bash commands
-        for (section, key) in AirflowConfigParser.as_command_stdout:
+        for (section, key) in self.as_command_stdout:
             opt = self._get_cmd_option(section, key)
             if opt:
                 if not display_sensitive:
                     opt = '< hidden >'
                 if display_source:
-                    opt = (opt, 'bash cmd')
+                    opt = (opt, 'cmd')
+                elif raw:
+                    opt = opt.replace('%', '%%')
                 cfg.setdefault(section, OrderedDict()).update({key: opt})
+                del cfg[section][key + '_cmd']
 
         return cfg
 
@@ -329,6 +450,17 @@ class AirflowConfigParser(ConfigParser):
         # then read any "custom" test settings
         self.read(TEST_CONFIG_FILE)
 
+    def _warn_deprecate(self, section, key, deprecated_name):
+        warnings.warn(
+            self.deprecation_format_string.format(
+                old=deprecated_name,
+                new=key,
+                section=section,
+            ),
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
 
 def mkdir_p(path):
     try:
@@ -337,26 +469,27 @@ def mkdir_p(path):
         if exc.errno == errno.EEXIST and os.path.isdir(path):
             pass
         else:
-            raise AirflowConfigException('Had trouble creating a directory')
+            raise AirflowConfigException(
+                'Error creating {}: {}'.format(path, exc.strerror))
+
+
+def get_airflow_home():
+    return expand_env_var(os.environ.get('AIRFLOW_HOME', '~/airflow'))
+
+
+def get_airflow_config(airflow_home):
+    if 'AIRFLOW_CONFIG' not in os.environ:
+        return os.path.join(airflow_home, 'airflow.cfg')
+    return expand_env_var(os.environ['AIRFLOW_CONFIG'])
 
 
 # Setting AIRFLOW_HOME and AIRFLOW_CONFIG from environment variables, using
-# "~/airflow" and "~/airflow/airflow.cfg" respectively as defaults.
+# "~/airflow" and "$AIRFLOW_HOME/airflow.cfg" respectively as defaults.
 
-if 'AIRFLOW_HOME' not in os.environ:
-    AIRFLOW_HOME = expand_env_var('~/airflow')
-else:
-    AIRFLOW_HOME = expand_env_var(os.environ['AIRFLOW_HOME'])
-
+AIRFLOW_HOME = get_airflow_home()
+AIRFLOW_CONFIG = get_airflow_config(AIRFLOW_HOME)
 mkdir_p(AIRFLOW_HOME)
 
-if 'AIRFLOW_CONFIG' not in os.environ:
-    if os.path.isfile(expand_env_var('~/airflow.cfg')):
-        AIRFLOW_CONFIG = expand_env_var('~/airflow.cfg')
-    else:
-        AIRFLOW_CONFIG = AIRFLOW_HOME + '/airflow.cfg'
-else:
-    AIRFLOW_CONFIG = expand_env_var(os.environ['AIRFLOW_CONFIG'])
 
 # Set up dags folder for unit tests
 # this directory won't exist if users install via pip
@@ -414,59 +547,49 @@ if not os.path.isfile(AIRFLOW_CONFIG):
     )
     with open(AIRFLOW_CONFIG, 'w') as f:
         cfg = parameterized_config(DEFAULT_CONFIG)
-        f.write(cfg.split(TEMPLATE_START)[-1].strip())
+        cfg = cfg.split(TEMPLATE_START)[-1].strip()
+        if six.PY2:
+            cfg = cfg.encode('utf8')
+        f.write(cfg)
 
 log.info("Reading the config from %s", AIRFLOW_CONFIG)
 
-conf = AirflowConfigParser()
+conf = AirflowConfigParser(default_config=parameterized_config(DEFAULT_CONFIG))
+
 conf.read(AIRFLOW_CONFIG)
 
 
-def load_test_config():
-    """
-    Load the unit test configuration.
+if conf.getboolean('webserver', 'rbac'):
+    DEFAULT_WEBSERVER_CONFIG = _read_default_config_file('default_webserver_config.py')
 
-    Note: this is not reversible.
-    """
-    conf.load_test_config()
+    WEBSERVER_CONFIG = AIRFLOW_HOME + '/webserver_config.py'
+
+    if not os.path.isfile(WEBSERVER_CONFIG):
+        log.info('Creating new FAB webserver config file in: %s', WEBSERVER_CONFIG)
+        with open(WEBSERVER_CONFIG, 'w') as f:
+            f.write(DEFAULT_WEBSERVER_CONFIG)
 
 if conf.getboolean('core', 'unit_test_mode'):
-    load_test_config()
+    conf.load_test_config()
 
+# Historical convenience functions to access config entries
 
-def get(section, key, **kwargs):
-    return conf.get(section, key, **kwargs)
+load_test_config = conf.load_test_config
+get = conf.get
+getboolean = conf.getboolean
+getfloat = conf.getfloat
+getint = conf.getint
+getsection = conf.getsection
+has_option = conf.has_option
+remove_option = conf.remove_option
+as_dict = conf.as_dict
+set = conf.set # noqa
 
-
-def getboolean(section, key):
-    return conf.getboolean(section, key)
-
-
-def getfloat(section, key):
-    return conf.getfloat(section, key)
-
-
-def getint(section, key):
-    return conf.getint(section, key)
-
-
-def getsection(section):
-    return conf.getsection(section)
-
-
-def has_option(section, key):
-    return conf.has_option(section, key)
-
-
-def remove_option(section, option):
-    return conf.remove_option(section, option)
-
-
-def as_dict(display_source=False, display_sensitive=False):
-    return conf.as_dict(
-        display_source=display_source, display_sensitive=display_sensitive)
-as_dict.__doc__ = conf.as_dict.__doc__
-
-
-def set(section, option, value):  # noqa
-    return conf.set(section, option, value)
+for func in [load_test_config, get, getboolean, getfloat, getint, has_option,
+             remove_option, as_dict, set]:
+    _deprecated(
+        func,
+        "Accessing configuration method '{f.__name__}' directly from "
+        "the configuration module is deprecated. Please access the "
+        "configuration from the 'configuration.conf' object via "
+        "'conf.{f.__name__}'".format(f=func))
