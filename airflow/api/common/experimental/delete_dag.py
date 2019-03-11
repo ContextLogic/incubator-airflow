@@ -1,33 +1,39 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
-from airflow import models, settings
-from airflow.exceptions import AirflowException
 from sqlalchemy import or_
 
-
-class DagFileExists(AirflowException):
-    status = 400
-
-
-class DagNotFound(AirflowException):
-    status = 404
+from airflow import models
+from airflow.utils.db import provide_session
+from airflow.exceptions import DagNotFound, DagFileExists
 
 
-def delete_dag(dag_id):
-    session = settings.Session()
-
+@provide_session
+def delete_dag(dag_id, keep_records_in_log=True, session=None):
+    """
+    :param dag_id: the dag_id of the DAG to delete
+    :type dag_id: str
+    :param keep_records_in_log: whether keep records of the given dag_id
+        in the Log table in the backend database (for reasons like auditing).
+        The default value is True.
+    :type keep_records_in_log: bool
+    """
     DM = models.DagModel
     dag = session.query(DM).filter(DM.dag_id == dag_id).first()
     if dag is None:
@@ -40,8 +46,11 @@ def delete_dag(dag_id):
 
     count = 0
 
+    # noinspection PyUnresolvedReferences,PyProtectedMember
     for m in models.Base._decl_class_registry.values():
         if hasattr(m, "dag_id"):
+            if keep_records_in_log and m.__name__ == 'Log':
+                continue
             cond = or_(m.dag_id == dag_id, m.dag_id.like(dag_id + ".%"))
             count += session.query(m).filter(cond).delete(synchronize_session='fetch')
 
@@ -49,7 +58,5 @@ def delete_dag(dag_id):
         p, c = dag_id.rsplit(".", 1)
         for m in models.DagRun, models.TaskFail, models.TaskInstance:
             count += session.query(m).filter(m.dag_id == p, m.task_id == c).delete()
-
-    session.commit()
 
     return count

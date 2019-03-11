@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 
 from builtins import str
@@ -27,11 +32,11 @@ class HttpSensor(BaseSensorOperator):
         404 not found or response_check function returned False
 
     :param http_conn_id: The connection to run the sensor against
-    :type http_conn_id: string
+    :type http_conn_id: str
     :param method: The HTTP request method to use
-    :type method: string
+    :type method: str
     :param endpoint: The relative part of the full url
-    :type endpoint: string
+    :type endpoint: str
     :param request_params: The parameters to be added to the GET url
     :type request_params: a dictionary of string key/value pairs
     :param headers: The HTTP headers to be added to the GET request

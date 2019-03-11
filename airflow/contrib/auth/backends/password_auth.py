@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from __future__ import unicode_literals
 
@@ -18,7 +23,7 @@ from sys import version_info
 
 import base64
 import flask_login
-from flask_login import current_user
+from flask_login import login_required, current_user, logout_user  # noqa: F401
 from flask import flash, Response
 from wtforms import Form, PasswordField, StringField
 from wtforms.validators import InputRequired
@@ -30,9 +35,8 @@ from flask_bcrypt import generate_password_hash, check_password_hash
 from sqlalchemy import Column, String
 from sqlalchemy.ext.hybrid import hybrid_property
 
-from airflow import settings
 from airflow import models
-from airflow.utils.db import provide_session
+from airflow.utils.db import provide_session, create_session
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 login_manager = flask_login.LoginManager()
@@ -41,6 +45,9 @@ login_manager.login_message = None
 
 log = LoggingMixin().log
 PY3 = version_info[0] == 3
+
+
+client_auth = None
 
 
 class AuthenticationError(Exception):
@@ -58,7 +65,7 @@ class PasswordUser(models.User):
         return self._password
 
     @password.setter
-    def _set_password(self, plaintext):
+    def password(self, plaintext):
         self._password = generate_password_hash(plaintext, 12)
         if PY3:
             self._password = str(self._password, 'utf-8')
@@ -66,29 +73,31 @@ class PasswordUser(models.User):
     def authenticate(self, plaintext):
         return check_password_hash(self._password, plaintext)
 
+    @property
     def is_active(self):
-        '''Required by flask_login'''
+        """Required by flask_login"""
         return True
 
+    @property
     def is_authenticated(self):
-        '''Required by flask_login'''
+        """Required by flask_login"""
         return True
 
+    @property
     def is_anonymous(self):
-        '''Required by flask_login'''
+        """Required by flask_login"""
         return False
 
     def get_id(self):
-        '''Returns the current user id as required by flask_login'''
+        """Returns the current user id as required by flask_login"""
         return str(self.id)
 
     def data_profiling(self):
-        '''Provides access to data profiling tools'''
+        """Provides access to data profiling tools"""
         return True
 
     def is_superuser(self):
-        '''Access all the things'''
-        return True
+        return hasattr(self, 'user') and self.user.is_superuser()
 
 
 @login_manager.user_loader
@@ -132,7 +141,7 @@ def authenticate(session, username, password):
 
 @provide_session
 def login(self, request, session=None):
-    if current_user.is_authenticated():
+    if current_user.is_authenticated:
         flash("You are already logged in")
         return redirect(url_for('admin.index'))
 
@@ -155,9 +164,6 @@ def login(self, request, session=None):
         return self.render('airflow/login.html',
                            title="Airflow - Login",
                            form=form)
-    finally:
-        session.commit()
-        session.close()
 
 
 class LoginForm(Form):
@@ -191,19 +197,16 @@ def requires_authentication(function):
             userpass = ''.join(header.split()[1:])
             username, password = base64.b64decode(userpass).decode("utf-8").split(":", 1)
 
-            session = settings.Session()
-            try:
-                authenticate(session, username, password)
+            with create_session() as session:
+                try:
+                    authenticate(session, username, password)
 
-                response = function(*args, **kwargs)
-                response = make_response(response)
-                return response
+                    response = function(*args, **kwargs)
+                    response = make_response(response)
+                    return response
 
-            except AuthenticationError:
-                return _forbidden()
+                except AuthenticationError:
+                    return _forbidden()
 
-            finally:
-                session.commit()
-                session.close()
         return _unauthorized()
     return decorated
