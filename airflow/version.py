@@ -18,8 +18,4 @@
 # under the License.
 #
 
-<<<<<<< HEAD
-version = '1.10.0'
-=======
 version = '1.10.2'
->>>>>>> 4eb175400b57398be511a6d13b61b6d0303f857d
