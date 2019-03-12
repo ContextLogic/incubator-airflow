@@ -24,7 +24,7 @@ import inspect
 import json
 import time
 import wtforms
-import bleach
+#import bleach
 import markdown
 import re
 import zipfile
@@ -235,8 +235,10 @@ def make_cache_key(*args, **kwargs):
 
 
 def task_instance_link(attr):
-    dag_id = bleach.clean(attr.get('dag_id')) if attr.get('dag_id') else None
-    task_id = bleach.clean(attr.get('task_id')) if attr.get('task_id') else None
+    #dag_id = bleach.clean(attr.get('dag_id')) if attr.get('dag_id') else None
+    dag_id = attr.get('dag_id') if attr.get('dag_id') else None
+    #task_id = bleach.clean(attr.get('task_id')) if attr.get('task_id') else None
+    task_id = attr.get('task_id') if attr.get('task_id') else None
     execution_date = attr.get('execution_date')
     url = url_for(
         'Airflow.task',
@@ -290,7 +292,8 @@ def datetime_f(attr_name):
 
 
 def dag_link(attr):
-    dag_id = bleach.clean(attr.get('dag_id')) if attr.get('dag_id') else None
+    #dag_id = bleach.clean(attr.get('dag_id')) if attr.get('dag_id') else None
+    dag_id = attr.get('dag_id') if attr.get('dag_id') else None
     execution_date = attr.get('execution_date')
     url = url_for(
         'Airflow.graph',
@@ -301,8 +304,10 @@ def dag_link(attr):
 
 
 def dag_run_link(attr):
-    dag_id = bleach.clean(attr.get('dag_id')) if attr.get('dag_id') else None
-    run_id = bleach.clean(attr.get('run_id')) if attr.get('run_id') else None
+    #dag_id = bleach.clean(attr.get('dag_id')) if attr.get('dag_id') else None
+    dag_id = attr.get('dag_id') if attr.get('dag_id') else None
+    #run_id = bleach.clean(attr.get('run_id')) if attr.get('run_id') else None
+    run_id = attr.get('run_id') if attr.get('run_id') else None
     execution_date = attr.get('execution_date')
     url = url_for(
         'Airflow.graph',
