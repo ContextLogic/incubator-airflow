@@ -26,8 +26,11 @@ from airflow.hooks.base_hook import BaseHook
 
 snakebite_imported = False
 if PY2:
-    from snakebite.client import Client, HAClient, Namenode, AutoConfigClient
-    snakebite_imported = True
+    try:
+        from snakebite.client import Client, HAClient, Namenode, AutoConfigClient
+        snakebite_imported = True
+    except ImportError:
+        snakebite_imported = False
 
 
 class HDFSHookException(AirflowException):
