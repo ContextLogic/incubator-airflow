@@ -238,7 +238,7 @@ def do_setup():
             'zope.deprecation>=4.0, <5.0',
         ],
         setup_requires=[
-            'docutils',
+            'docutils==0.15',
         ],
         extras_require={
             'all': devel_all,
