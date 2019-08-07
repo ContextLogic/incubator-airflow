@@ -103,7 +103,7 @@ class S3TaskHandler(FileTaskHandler, LoggingMixin):
             # returned remote_log will contain error messages.
             remote_log = self.s3_read(remote_loc, return_error=True)
             log = '*** Reading remote log from {}.\n{}\n'.format(
-                remote_loc, remote_log)
+                remote_loc, remote_log.encode('utf-8'))
         else:
             log = super(S3TaskHandler, self)._read(ti, try_number)
 
