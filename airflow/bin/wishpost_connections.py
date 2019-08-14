@@ -22,7 +22,15 @@ class WishPostConnections(object):
         options.env = os.environ.get('AIRFLOW_ENV')
         configure()
         application = WishPostApplication(options, None)
-        application.connect()
+        from wishpost.model import lib as wosp_lib
+        from wishchain.model import lib as chain_lib
+        import copy as cp
+        db_conn = cp.deepcopy(wosp_lib.CONNECTION_TO_DB)
+
+        db_conn['wishchain'] = list(
+            set(chain_lib.CONNECTION_TO_DB[chain_lib.MAIN_CONNECTION]) -
+            set(wosp_lib.CONNECTION_TO_DB[wosp_lib.MAIN_CONNECTION]))
+        application.connect(db_collection=db_conn)
 
         if not hasattr(options, 'application'):
             try:
