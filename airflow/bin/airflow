@@ -18,8 +18,6 @@ import sys
 import os
 from airflow import configuration
 from airflow.bin.cli import CLIFactory
-from airflow.bin.platform_connections import PlatformConnections
-from airflow.bin.wishpost_connections import WishPostConnections
 
 if __name__ == '__main__':
 
@@ -29,16 +27,6 @@ if __name__ == '__main__':
 
     parser = CLIFactory.get_parser()
     args = parser.parse_args()
-
-    platform = os.environ.get('AIRFLOW_PLATFORM')
-
-    if platform and platform == 'data_platform':
-
-        PlatformConnections.connect_data_platform()
-
-    elif platform and platform == 'wishpost':
-
-        WishPostConnections.connect_wishpost()
 
     # Proceed to handle airflow command
     args.func(args)
