@@ -44,7 +44,7 @@ def mssql_timestamp():
 
 
 def mysql_timestamp():
-    return mysql.TIMESTAMP(fsp=6)
+    return mysql.TIMESTAMP()
 
 
 def sa_timestamp():

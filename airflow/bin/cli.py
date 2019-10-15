@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/production/airflow/persistent/virtualenv/bin/python
 # -*- coding: utf-8 -*-
 #
 # Licensed to the Apache Software Foundation (ASF) under one
