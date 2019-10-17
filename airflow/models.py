@@ -2207,6 +2207,7 @@ class BaseOperator(LoggingMixin):
             resources=None,
             run_as_user=None,
             task_concurrency=None,
+            platform=None,
             *args,
             **kwargs):
 
