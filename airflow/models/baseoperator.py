@@ -301,6 +301,7 @@ class BaseOperator(LoggingMixin):
         do_xcom_push=True,  # type: bool
         inlets=None,  # type: Optional[Dict]
         outlets=None,  # type: Optional[Dict]
+        platform=None, # type: Optional[str]
         *args,
         **kwargs
     ):
