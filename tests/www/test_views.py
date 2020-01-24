@@ -1,36 +1,49 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import io
 import copy
 import logging.config
+import mock
 import os
 import shutil
 import tempfile
 import unittest
 import sys
+import json
 
+from six.moves.urllib.parse import quote_plus
 from werkzeug.test import Client
+from werkzeug.wrappers import BaseResponse
 
-from airflow import models, configuration, settings
+
+import airflow
+from airflow import models
+from airflow.configuration import conf
 from airflow.config_templates.airflow_local_settings import DEFAULT_LOGGING_CONFIG
-from airflow.models import DAG, TaskInstance
+from airflow.models import DAG, DagRun, TaskInstance
 from airflow.operators.dummy_operator import DummyOperator
 from airflow.settings import Session
 from airflow.utils.timezone import datetime
 from airflow.www import app as application
-from airflow import configuration as conf
+
+from tests.test_utils.config import conf_vars
 
 
 class TestChartModelView(unittest.TestCase):
@@ -51,7 +64,6 @@ class TestChartModelView(unittest.TestCase):
 
     def setUp(self):
         super(TestChartModelView, self).setUp()
-        configuration.load_test_config()
         app = application.create_app(testing=True)
         app.config['WTF_CSRF_METHODS'] = []
         self.app = app.test_client()
@@ -59,7 +71,7 @@ class TestChartModelView(unittest.TestCase):
         self.chart = {
             'label': 'chart',
             'owner': 'airflow',
-            'conn_id': 'airflow_ci',
+            'conn_id': 'airflow_db',
         }
 
     def tearDown(self):
@@ -90,7 +102,6 @@ class TestChartModelView(unittest.TestCase):
             '/admin/chart?sort=3',
             follow_redirects=True,
         )
-        print(response.data)
         self.assertEqual(response.status_code, 200)
         self.assertIn('Sort by Owner', response.data.decode('utf-8'))
 
@@ -109,7 +120,6 @@ class TestVariableView(unittest.TestCase):
 
     def setUp(self):
         super(TestVariableView, self).setUp()
-        configuration.load_test_config()
         app = application.create_app(testing=True)
         app.config['WTF_CSRF_METHODS'] = []
         self.app = app.test_client()
@@ -149,8 +159,6 @@ class TestVariableView(unittest.TestCase):
         response = self.app.get('/admin/variable', follow_redirects=True)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.session.query(models.Variable).count(), 1)
-        self.assertIn('<span class="label label-danger">Invalid</span>',
-                      response.data.decode('utf-8'))
 
     def test_xss_prevention(self):
         xss = "/admin/airflow/variables/asdf<img%20src=''%20onerror='alert(1);'>"
@@ -183,7 +191,6 @@ class TestKnownEventView(unittest.TestCase):
 
     def setUp(self):
         super(TestKnownEventView, self).setUp()
-        configuration.load_test_config()
         app = application.create_app(testing=True)
         app.config['WTF_CSRF_METHODS'] = []
         self.app = app.test_client()
@@ -248,7 +255,6 @@ class TestPoolModelView(unittest.TestCase):
 
     def setUp(self):
         super(TestPoolModelView, self).setUp()
-        configuration.load_test_config()
         app = application.create_app(testing=True)
         app.config['WTF_CSRF_METHODS'] = []
         self.app = app.test_client()
@@ -324,9 +330,10 @@ class TestLogView(unittest.TestCase):
 
     def setUp(self):
         super(TestLogView, self).setUp()
+        # Make sure that the configure_logging is not cached
+        self.old_modules = dict(sys.modules)
 
         # Create a custom logging configuration
-        configuration.load_test_config()
         logging_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
         current_dir = os.path.dirname(os.path.abspath(__file__))
         logging_config['handlers']['task']['base_log_folder'] = os.path.normpath(
@@ -357,13 +364,17 @@ class TestLogView(unittest.TestCase):
 
     def tearDown(self):
         logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
-        dagbag = models.DagBag(settings.DAGS_FOLDER)
         self.session.query(TaskInstance).filter(
             TaskInstance.dag_id == self.DAG_ID and
             TaskInstance.task_id == self.TASK_ID and
             TaskInstance.execution_date == self.DEFAULT_DATE).delete()
         self.session.commit()
         self.session.close()
+
+        # Remove any new modules imported during the test run. This lets us
+        # import the same source files for more than one test.
+        for m in [m for m in sys.modules if m not in self.old_modules]:
+            del sys.modules[m]
 
         sys.path.remove(self.settings_folder)
         shutil.rmtree(self.settings_folder)
@@ -377,8 +388,84 @@ class TestLogView(unittest.TestCase):
             follow_redirects=True,
         )
         self.assertEqual(response.status_code, 200)
-        self.assertIn('Log file does not exist',
+        self.assertIn('Log by attempts',
                       response.data.decode('utf-8'))
+
+    def test_get_logs_with_metadata_as_download_file(self):
+        url_template = "/admin/airflow/get_logs_with_metadata?dag_id={}&" \
+                       "task_id={}&execution_date={}&" \
+                       "try_number={}&metadata={}&format=file"
+        try_number = 1
+        url = url_template.format(self.DAG_ID,
+                                  self.TASK_ID,
+                                  quote_plus(self.DEFAULT_DATE.isoformat()),
+                                  try_number,
+                                  json.dumps({}))
+        response = self.app.get(url)
+        expected_filename = '{}/{}/{}/{}.log'.format(self.DAG_ID,
+                                                     self.TASK_ID,
+                                                     self.DEFAULT_DATE.isoformat(),
+                                                     try_number)
+
+        content_disposition = response.headers.get('Content-Disposition')
+        self.assertTrue(content_disposition.startswith('attachment'))
+        self.assertTrue(expected_filename in content_disposition)
+        self.assertEqual(200, response.status_code)
+        self.assertIn('Log for testing.', response.data.decode('utf-8'))
+
+    def test_get_logs_with_metadata_as_download_large_file(self):
+        with mock.patch("airflow.utils.log.file_task_handler.FileTaskHandler.read") as read_mock:
+            first_return = (['1st line'], [{}])
+            second_return = (['2nd line'], [{'end_of_log': False}])
+            third_return = (['3rd line'], [{'end_of_log': True}])
+            fourth_return = (['should never be read'], [{'end_of_log': True}])
+            read_mock.side_effect = [first_return, second_return, third_return, fourth_return]
+            url_template = "/admin/airflow/get_logs_with_metadata?dag_id={}&" \
+                           "task_id={}&execution_date={}&" \
+                           "try_number={}&metadata={}&format=file"
+            try_number = 1
+            url = url_template.format(self.DAG_ID,
+                                      self.TASK_ID,
+                                      quote_plus(self.DEFAULT_DATE.isoformat()),
+                                      try_number,
+                                      json.dumps({}))
+            response = self.app.get(url)
+
+            self.assertIn('1st line', response.data.decode('utf-8'))
+            self.assertIn('2nd line', response.data.decode('utf-8'))
+            self.assertIn('3rd line', response.data.decode('utf-8'))
+            self.assertNotIn('should never be read', response.data.decode('utf-8'))
+
+    def test_get_logs_with_metadata(self):
+        url_template = "/admin/airflow/get_logs_with_metadata?dag_id={}&" \
+                       "task_id={}&execution_date={}&" \
+                       "try_number={}&metadata={}"
+        response = \
+            self.app.get(url_template.format(self.DAG_ID,
+                                             self.TASK_ID,
+                                             quote_plus(self.DEFAULT_DATE.isoformat()),
+                                             1,
+                                             json.dumps({})))
+
+        self.assertIn('"message":', response.data.decode('utf-8'))
+        self.assertIn('"metadata":', response.data.decode('utf-8'))
+        self.assertIn('Log for testing.', response.data.decode('utf-8'))
+        self.assertEqual(200, response.status_code)
+
+    def test_get_logs_with_null_metadata(self):
+        url_template = "/admin/airflow/get_logs_with_metadata?dag_id={}&" \
+                       "task_id={}&execution_date={}&" \
+                       "try_number={}&metadata=null"
+        response = \
+            self.app.get(url_template.format(self.DAG_ID,
+                                             self.TASK_ID,
+                                             quote_plus(self.DEFAULT_DATE.isoformat()),
+                                             1))
+
+        self.assertIn('"message":', response.data.decode('utf-8'))
+        self.assertIn('"metadata":', response.data.decode('utf-8'))
+        self.assertIn('Log for testing.', response.data.decode('utf-8'))
+        self.assertEqual(200, response.status_code)
 
 
 class TestVarImportView(unittest.TestCase):
@@ -398,7 +485,6 @@ class TestVarImportView(unittest.TestCase):
 
     def setUp(self):
         super(TestVarImportView, self).setUp()
-        configuration.load_test_config()
         app = application.create_app(testing=True)
         app.config['WTF_CSRF_METHODS'] = []
         self.app = app.test_client()
@@ -414,36 +500,579 @@ class TestVarImportView(unittest.TestCase):
         session.close()
         super(TestVarImportView, cls).tearDownClass()
 
+    def test_import_variable_fail(self):
+        with mock.patch('airflow.models.Variable.set') as set_mock:
+            set_mock.side_effect = UnicodeEncodeError
+            content = '{"fail_key": "fail_val"}'
+
+            try:
+                # python 3+
+                bytes_content = io.BytesIO(bytes(content, encoding='utf-8'))
+            except TypeError:
+                # python 2.7
+                bytes_content = io.BytesIO(bytes(content))
+            response = self.app.post(
+                self.IMPORT_ENDPOINT,
+                data={'file': (bytes_content, 'test.json')},
+                follow_redirects=True
+            )
+            self.assertEqual(response.status_code, 200)
+            session = Session()
+            db_dict = {x.key: x.get_val() for x in session.query(models.Variable).all()}
+            session.close()
+            self.assertNotIn('fail_key', db_dict)
+
     def test_import_variables(self):
+        content = ('{"str_key": "str_value", "int_key": 60,'
+                   '"list_key": [1, 2], "dict_key": {"k_a": 2, "k_b": 3}}')
+        try:
+            # python 3+
+            bytes_content = io.BytesIO(bytes(content, encoding='utf-8'))
+        except TypeError:
+            # python 2.7
+            bytes_content = io.BytesIO(bytes(content))
         response = self.app.post(
             self.IMPORT_ENDPOINT,
-            data={'file': (io.BytesIO(b'{"KEY": "VALUE"}'), 'test.json')},
+            data={'file': (bytes_content, 'test.json')},
             follow_redirects=True
         )
         self.assertEqual(response.status_code, 200)
-        body = response.data.decode('utf-8')
-        self.assertIn('KEY', body)
-        self.assertIn('VALUE', body)
+        session = Session()
+        # Extract values from Variable
+        db_dict = {x.key: x.get_val() for x in session.query(models.Variable).all()}
+        session.close()
+        self.assertIn('str_key', db_dict)
+        self.assertIn('int_key', db_dict)
+        self.assertIn('list_key', db_dict)
+        self.assertIn('dict_key', db_dict)
+        self.assertEqual('str_value', db_dict['str_key'])
+        self.assertEqual('60', db_dict['int_key'])
+        self.assertEqual(u'[\n  1,\n  2\n]', db_dict['list_key'])
+
+        case_a_dict = u'{\n  "k_a": 2,\n  "k_b": 3\n}'
+        case_b_dict = u'{\n  "k_b": 3,\n  "k_a": 2\n}'
+        try:
+            self.assertEqual(case_a_dict, db_dict['dict_key'])
+        except AssertionError:
+            self.assertEqual(case_b_dict, db_dict['dict_key'])
 
 
+@conf_vars({("webserver", "base_url"): "http://localhost:8080/test"})
 class TestMountPoint(unittest.TestCase):
-    def setUp(self):
-        super(TestMountPoint, self).setUp()
-        configuration.load_test_config()
-        configuration.conf.set("webserver", "base_url", "http://localhost:8080/test")
-        config = dict()
-        config['WTF_CSRF_METHODS'] = []
-        app = application.cached_app(config=config, testing=True)
-        self.client = Client(app)
+    @classmethod
+    def setUpClass(cls):
+        # Clear cached app to remount base_url forcefully
+        application.app = None
+        app = application.cached_app(config={'WTF_CSRF_ENABLED': False}, testing=True)
+        cls.client = Client(app, BaseResponse)
+
+    @classmethod
+    def tearDownClass(cls):
+        application.app = None
+        application.appbuilder = None
 
     def test_mount(self):
-        response, _, _ = self.client.get('/', follow_redirects=True)
-        txt = b''.join(response)
-        self.assertEqual(b"Apache Airflow is not at this location", txt)
+        # Test an endpoint that doesn't need auth!
+        resp = self.client.get('/test/health')
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"healthy", resp.data)
 
-        response, _, _ = self.client.get('/test', follow_redirects=True)
-        resp_html = b''.join(response)
-        self.assertIn(b"DAGs", resp_html)
+    def test_not_found(self):
+        resp = self.client.get('/', follow_redirects=True)
+        self.assertEqual(resp.status_code, 404)
+
+
+class ViewWithDateTimeAndNumRunsAndDagRunsFormTester:
+    DAG_ID = 'dag_for_testing_dt_nr_dr_form'
+    DEFAULT_DATE = datetime(2017, 9, 1)
+    RUNS_DATA = [
+        ('dag_run_for_testing_dt_nr_dr_form_4', datetime(2018, 4, 4)),
+        ('dag_run_for_testing_dt_nr_dr_form_3', datetime(2018, 3, 3)),
+        ('dag_run_for_testing_dt_nr_dr_form_2', datetime(2018, 2, 2)),
+        ('dag_run_for_testing_dt_nr_dr_form_1', datetime(2018, 1, 1)),
+    ]
+
+    def __init__(self, test, endpoint):
+        self.test = test
+        self.endpoint = endpoint
+
+    def setUp(self):
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        self.app = app.test_client()
+        self.session = Session()
+        from airflow.www.views import dagbag
+        from airflow.utils.state import State
+        dag = DAG(self.DAG_ID, start_date=self.DEFAULT_DATE)
+        dagbag.bag_dag(dag, parent_dag=dag, root_dag=dag)
+        self.runs = []
+        for rd in self.RUNS_DATA:
+            run = dag.create_dagrun(
+                run_id=rd[0],
+                execution_date=rd[1],
+                state=State.SUCCESS,
+                external_trigger=True
+            )
+            self.runs.append(run)
+
+    def tearDown(self):
+        self.session.query(DagRun).filter(
+            DagRun.dag_id == self.DAG_ID).delete()
+        self.session.commit()
+        self.session.close()
+
+    def assertBaseDateAndNumRuns(self, base_date, num_runs, data):
+        self.test.assertNotIn('name="base_date" value="{}"'.format(base_date), data)
+        self.test.assertNotIn('<option selected="" value="{}">{}</option>'.format(
+            num_runs, num_runs), data)
+
+    def assertRunIsNotInDropdown(self, run, data):
+        self.test.assertNotIn(run.execution_date.isoformat(), data)
+        self.test.assertNotIn(run.run_id, data)
+
+    def assertRunIsInDropdownNotSelected(self, run, data):
+        self.test.assertIn('<option value="{}">{}</option>'.format(
+            run.execution_date.isoformat(), run.run_id), data)
+
+    def assertRunIsSelected(self, run, data):
+        self.test.assertIn('<option selected value="{}">{}</option>'.format(
+            run.execution_date.isoformat(), run.run_id), data)
+
+    def test_with_default_parameters(self):
+        """
+        Tests graph view with no URL parameter.
+        Should show all dag runs in the drop down.
+        Should select the latest dag run.
+        Should set base date to current date (not asserted)
+        """
+        response = self.app.get(
+            self.endpoint
+        )
+        self.test.assertEqual(response.status_code, 200)
+        data = response.data.decode('utf-8')
+        self.test.assertIn('Base date:', data)
+        self.test.assertIn('Number of runs:', data)
+        self.assertRunIsSelected(self.runs[0], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[1], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[2], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[3], data)
+
+    def test_with_execution_date_parameter_only(self):
+        """
+        Tests graph view with execution_date URL parameter.
+        Scenario: click link from dag runs view.
+        Should only show dag runs older than execution_date in the drop down.
+        Should select the particular dag run.
+        Should set base date to execution date.
+        """
+        response = self.app.get(
+            self.endpoint + '&execution_date={}'.format(
+                self.runs[1].execution_date.isoformat())
+        )
+        self.test.assertEqual(response.status_code, 200)
+        data = response.data.decode('utf-8')
+        self.assertBaseDateAndNumRuns(
+            self.runs[1].execution_date,
+            conf.getint('webserver', 'default_dag_run_display_number'),
+            data)
+        self.assertRunIsNotInDropdown(self.runs[0], data)
+        self.assertRunIsSelected(self.runs[1], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[2], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[3], data)
+
+    def test_with_base_date_and_num_runs_parmeters_only(self):
+        """
+        Tests graph view with base_date and num_runs URL parameters.
+        Should only show dag runs older than base_date in the drop down,
+        limited to num_runs.
+        Should select the latest dag run.
+        Should set base date and num runs to submitted values.
+        """
+        response = self.app.get(
+            self.endpoint + '&base_date={}&num_runs=2'.format(
+                self.runs[1].execution_date.isoformat())
+        )
+        self.test.assertEqual(response.status_code, 200)
+        data = response.data.decode('utf-8')
+        self.assertBaseDateAndNumRuns(self.runs[1].execution_date, 2, data)
+        self.assertRunIsNotInDropdown(self.runs[0], data)
+        self.assertRunIsSelected(self.runs[1], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[2], data)
+        self.assertRunIsNotInDropdown(self.runs[3], data)
+
+    def test_with_base_date_and_num_runs_and_execution_date_outside(self):
+        """
+        Tests graph view with base_date and num_runs and execution-date URL parameters.
+        Scenario: change the base date and num runs and press "Go",
+        the selected execution date is outside the new range.
+        Should only show dag runs older than base_date in the drop down.
+        Should select the latest dag run within the range.
+        Should set base date and num runs to submitted values.
+        """
+        response = self.app.get(
+            self.endpoint + '&base_date={}&num_runs=42&execution_date={}'.format(
+                self.runs[1].execution_date.isoformat(),
+                self.runs[0].execution_date.isoformat())
+        )
+        self.test.assertEqual(response.status_code, 200)
+        data = response.data.decode('utf-8')
+        self.assertBaseDateAndNumRuns(self.runs[1].execution_date, 42, data)
+        self.assertRunIsNotInDropdown(self.runs[0], data)
+        self.assertRunIsSelected(self.runs[1], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[2], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[3], data)
+
+    def test_with_base_date_and_num_runs_and_execution_date_within(self):
+        """
+        Tests graph view with base_date and num_runs and execution-date URL parameters.
+        Scenario: change the base date and num runs and press "Go",
+        the selected execution date is within the new range.
+        Should only show dag runs older than base_date in the drop down.
+        Should select the dag run with the execution date.
+        Should set base date and num runs to submitted values.
+        """
+        response = self.app.get(
+            self.endpoint + '&base_date={}&num_runs=5&execution_date={}'.format(
+                self.runs[2].execution_date.isoformat(),
+                self.runs[3].execution_date.isoformat())
+        )
+        self.test.assertEqual(response.status_code, 200)
+        data = response.data.decode('utf-8')
+        self.assertBaseDateAndNumRuns(self.runs[2].execution_date, 5, data)
+        self.assertRunIsNotInDropdown(self.runs[0], data)
+        self.assertRunIsNotInDropdown(self.runs[1], data)
+        self.assertRunIsInDropdownNotSelected(self.runs[2], data)
+        self.assertRunIsSelected(self.runs[3], data)
+
+
+class TestGraphView(unittest.TestCase):
+    GRAPH_ENDPOINT = '/admin/airflow/graph?dag_id={dag_id}'.format(
+        dag_id=ViewWithDateTimeAndNumRunsAndDagRunsFormTester.DAG_ID
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestGraphView, cls).setUpClass()
+
+    def setUp(self):
+        super(TestGraphView, self).setUp()
+        self.tester = ViewWithDateTimeAndNumRunsAndDagRunsFormTester(
+            self, self.GRAPH_ENDPOINT)
+        self.tester.setUp()
+
+    def tearDown(self):
+        self.tester.tearDown()
+        super(TestGraphView, self).tearDown()
+
+    @classmethod
+    def tearDownClass(cls):
+        super(TestGraphView, cls).tearDownClass()
+
+    def test_dt_nr_dr_form_default_parameters(self):
+        self.tester.test_with_default_parameters()
+
+    def test_dt_nr_dr_form_with_execution_date_parameter_only(self):
+        self.tester.test_with_execution_date_parameter_only()
+
+    def test_dt_nr_dr_form_with_base_date_and_num_runs_parmeters_only(self):
+        self.tester.test_with_base_date_and_num_runs_parmeters_only()
+
+    def test_dt_nr_dr_form_with_base_date_and_num_runs_and_execution_date_outside(self):
+        self.tester.test_with_base_date_and_num_runs_and_execution_date_outside()
+
+    def test_dt_nr_dr_form_with_base_date_and_num_runs_and_execution_date_within(self):
+        self.tester.test_with_base_date_and_num_runs_and_execution_date_within()
+
+
+class TestGanttView(unittest.TestCase):
+    GANTT_ENDPOINT = '/admin/airflow/gantt?dag_id={dag_id}'.format(
+        dag_id=ViewWithDateTimeAndNumRunsAndDagRunsFormTester.DAG_ID
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestGanttView, cls).setUpClass()
+
+    def setUp(self):
+        super(TestGanttView, self).setUp()
+        self.tester = ViewWithDateTimeAndNumRunsAndDagRunsFormTester(
+            self, self.GANTT_ENDPOINT)
+        self.tester.setUp()
+
+    def tearDown(self):
+        self.tester.tearDown()
+        super(TestGanttView, self).tearDown()
+
+    @classmethod
+    def tearDownClass(cls):
+        super(TestGanttView, cls).tearDownClass()
+
+    def test_dt_nr_dr_form_default_parameters(self):
+        self.tester.test_with_default_parameters()
+
+    def test_dt_nr_dr_form_with_execution_date_parameter_only(self):
+        self.tester.test_with_execution_date_parameter_only()
+
+    def test_dt_nr_dr_form_with_base_date_and_num_runs_parmeters_only(self):
+        self.tester.test_with_base_date_and_num_runs_parmeters_only()
+
+    def test_dt_nr_dr_form_with_base_date_and_num_runs_and_execution_date_outside(self):
+        self.tester.test_with_base_date_and_num_runs_and_execution_date_outside()
+
+    def test_dt_nr_dr_form_with_base_date_and_num_runs_and_execution_date_within(self):
+        self.tester.test_with_base_date_and_num_runs_and_execution_date_within()
+
+
+class TestTaskInstanceView(unittest.TestCase):
+    TI_ENDPOINT = '/admin/taskinstance/?flt2_execution_date_greater_than={}'
+
+    def setUp(self):
+        super(TestTaskInstanceView, self).setUp()
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        self.app = app.test_client()
+
+    def test_start_date_filter(self):
+        resp = self.app.get(self.TI_ENDPOINT.format('2018-10-09+22:44:31'))
+        # We aren't checking the logic of the date filter itself (that is built
+        # in to flask-admin) but simply that our UTC conversion was run - i.e. it
+        # doesn't blow up!
+        self.assertEqual(resp.status_code, 200)
+
+
+class TestDeleteDag(unittest.TestCase):
+
+    def setUp(self):
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        self.app = app.test_client()
+
+    def test_delete_dag_button_normal(self):
+        resp = self.app.get('/', follow_redirects=True)
+        self.assertIn('/delete?dag_id=example_bash_operator', resp.data.decode('utf-8'))
+        self.assertIn("return confirmDeleteDag(this, 'example_bash_operator')", resp.data.decode('utf-8'))
+
+    def test_delete_dag_button_for_dag_on_scheduler_only(self):
+        # Test for JIRA AIRFLOW-3233 (PR 4069):
+        # The delete-dag URL should be generated correctly for DAGs
+        # that exist on the scheduler (DB) but not the webserver DagBag
+
+        test_dag_id = "non_existent_dag"
+
+        session = Session()
+        DM = models.DagModel
+        session.query(DM).filter(DM.dag_id == 'example_bash_operator').update({'dag_id': test_dag_id})
+        session.commit()
+
+        resp = self.app.get('/', follow_redirects=True)
+        self.assertIn('/delete?dag_id={}'.format(test_dag_id), resp.data.decode('utf-8'))
+        self.assertIn("return confirmDeleteDag(this, '{}')".format(test_dag_id), resp.data.decode('utf-8'))
+
+        session.query(DM).filter(DM.dag_id == test_dag_id).update({'dag_id': 'example_bash_operator'})
+        session.commit()
+
+
+class TestTriggerDag(unittest.TestCase):
+
+    def setUp(self):
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        self.app = app.test_client()
+        self.session = Session()
+        models.DagBag().get_dag("example_bash_operator").sync_to_db()
+
+    def test_trigger_dag_button_normal_exist(self):
+        resp = self.app.get('/', follow_redirects=True)
+        self.assertIn('/trigger?dag_id=example_bash_operator', resp.data.decode('utf-8'))
+        self.assertIn("return confirmDeleteDag(this, 'example_bash_operator')", resp.data.decode('utf-8'))
+
+    def test_trigger_dag_button(self):
+
+        test_dag_id = "example_bash_operator"
+
+        DR = models.DagRun
+        self.session.query(DR).delete()
+        self.session.commit()
+
+        self.app.post('/admin/airflow/trigger?dag_id={}'.format(test_dag_id))
+
+        run = self.session.query(DR).filter(DR.dag_id == test_dag_id).first()
+        self.assertIsNotNone(run)
+        self.assertIn("manual__", run.run_id)
+
+
+class HelpersTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = application.create_app(testing=True)
+
+        airflow.load_login()
+        # Delay this import until here
+        import airflow.www.views as views
+        cls.views = views
+
+    def test_state_token(self):
+        # It's shouldn't possible to set these odd values anymore, but lets
+        # ensure they are escaped!
+        html = str(self.views.state_token('<script>alert(1)</script>'))
+
+        self.assertIn(
+            '&lt;script&gt;alert(1)&lt;/script&gt;',
+            html,
+        )
+        self.assertNotIn(
+            '<script>alert(1)</script>',
+            html,
+        )
+
+    def test_task_instance_link(self):
+        mock_task = mock.Mock(dag_id='<a&1>', task_id='<b2>', execution_date=datetime(2017, 10, 12))
+        with self.app.test_request_context():
+            html = str(self.views.task_instance_link(
+                v=None, c=None, m=mock_task, p=None
+            ))
+
+        self.assertIn('%3Ca%261%3E', html)
+        self.assertIn('%3Cb2%3E', html)
+        self.assertNotIn('<a&1>', html)
+        self.assertNotIn('<b2>', html)
+
+    def test_dag_link(self):
+        mock_dag = mock.Mock(dag_id='<a&1>', execution_date=datetime(2017, 10, 12))
+        with self.app.test_request_context():
+            html = str(self.views.dag_link(
+                v=None, c=None, m=mock_dag, p=None
+            ))
+
+        self.assertIn('%3Ca%261%3E', html)
+        self.assertNotIn('<a&1>', html)
+
+    def test_dag_run_link(self):
+        mock_run = mock.Mock(dag_id='<a&1>', run_id='<b2>', execution_date=datetime(2017, 10, 12))
+        with self.app.test_request_context():
+            html = str(self.views.dag_run_link(
+                v=None, c=None, m=mock_run, p=None
+            ))
+
+        self.assertIn('%3Ca%261%3E', html)
+        self.assertIn('%3Cb2%3E', html)
+        self.assertNotIn('<a&1>', html)
+        self.assertNotIn('<b2>', html)
+
+
+class TestConnectionModelView(unittest.TestCase):
+
+    CREATE_ENDPOINT = '/admin/connection/new/?url=/admin/connection/'
+    CONN_ID = "new_conn"
+
+    CONN = {
+        "conn_id": CONN_ID,
+        "conn_type": "http",
+        "host": "https://example.com",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestConnectionModelView, cls).setUpClass()
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        cls.app = app.test_client()
+
+    def setUp(self):
+        self.session = Session()
+
+    def tearDown(self):
+        self.session.query(models.Connection) \
+                    .filter(models.Connection.conn_id == self.CONN_ID).delete()
+        self.session.commit()
+        self.session.close()
+        super(TestConnectionModelView, self).tearDown()
+
+    def test_create(self):
+        response = self.app.post(
+            self.CREATE_ENDPOINT,
+            data=self.CONN,
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.session.query(models.Connection).filter(models.Connection.conn_id == self.CONN_ID).count(),
+            1
+        )
+
+    def test_create_error(self):
+        response = self.app.post(
+            self.CREATE_ENDPOINT,
+            data={"conn_type": "http"},
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'has-error', response.data)
+        self.assertEqual(
+            self.session.query(models.Connection).filter(models.Connection.conn_id == self.CONN_ID).count(),
+            0
+        )
+
+    def test_create_extras(self):
+        data = self.CONN.copy()
+        data.update({
+            "conn_type": "google_cloud_platform",
+            "extra__google_cloud_platform__num_retries": "2",
+        })
+        response = self.app.post(
+            self.CREATE_ENDPOINT,
+            data=data,
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        conn = self.session.query(models.Connection).filter(models.Connection.conn_id == self.CONN_ID).one()
+
+        self.assertEqual(conn.extra_dejson['extra__google_cloud_platform__num_retries'], 2)
+
+    def test_create_extras_empty_field(self):
+        data = self.CONN.copy()
+        data.update({
+            "conn_type": "google_cloud_platform",
+            "extra__google_cloud_platform__num_retries": "",
+        })
+        response = self.app.post(
+            self.CREATE_ENDPOINT,
+            data=data,
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        conn = self.session.query(models.Connection).filter(models.Connection.conn_id == self.CONN_ID).one()
+
+        self.assertIsNone(conn.extra_dejson['extra__google_cloud_platform__num_retries'])
+
+
+class TestDagModelView(unittest.TestCase):
+    EDIT_URL = '/admin/dagmodel/edit/?id=example_bash_operator'
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestDagModelView, cls).setUpClass()
+        app = application.create_app(testing=True)
+        app.config['WTF_CSRF_METHODS'] = []
+        cls.app = app.test_client()
+
+    def test_edit_disabled_fields(self):
+        response = self.app.post(
+            self.EDIT_URL,
+            data={
+                "fileloc": "/etc/passwd",
+                "description": "Set in tests",
+            },
+            follow_redirects=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        session = Session()
+        DM = models.DagModel
+        dm = session.query(DM).filter(DM.dag_id == 'example_bash_operator').one()
+        session.close()
+
+        self.assertEqual(dm.description, "Set in tests")
+        self.assertNotEqual(dm.fileloc, "/etc/passwd", "Disabled fields shouldn't be updated")
 
 
 if __name__ == '__main__':

@@ -1,23 +1,27 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 
 import unittest
 import shutil
 import tempfile
 
-from airflow import configuration
 from airflow import models, DAG
 from airflow.exceptions import AirflowSensorTimeout
 from airflow.contrib.sensors.file_sensor import FileSensor
@@ -26,7 +30,6 @@ from airflow.utils.timezone import datetime
 
 TEST_DAG_ID = 'unit_tests'
 DEFAULT_DATE = datetime(2015, 1, 1)
-configuration.load_test_config()
 
 
 def reset(dag_id=TEST_DAG_ID):
@@ -42,7 +45,6 @@ reset()
 
 class FileSensorTest(unittest.TestCase):
     def setUp(self):
-        configuration.load_test_config()
         from airflow.contrib.hooks.fs_hook import FSHook
         hook = FSHook()
         args = {
@@ -119,6 +121,18 @@ class FileSensorTest(unittest.TestCase):
                      ignore_ti_state=True)
         finally:
             shutil.rmtree(dir)
+
+    def test_default_fs_conn_id(self):
+        with tempfile.NamedTemporaryFile() as tmp:
+            task = FileSensor(
+                task_id="test",
+                filepath=tmp.name[1:],
+                dag=self.dag,
+                timeout=0,
+            )
+            task._hook = self.hook
+            task.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE,
+                     ignore_ti_state=True)
 
 
 if __name__ == '__main__':

@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from builtins import zip
 from collections import OrderedDict
@@ -28,20 +33,18 @@ class HiveStatsCollectionOperator(BaseOperator):
     """
     Gathers partition statistics using a dynamically generated Presto
     query, inserts the stats into a MySql table with this format. Stats
-    overwrite themselves if you rerun the same date/partition.
+    overwrite themselves if you rerun the same date/partition. ::
 
-    ``
-    CREATE TABLE hive_stats (
-        ds VARCHAR(16),
-        table_name VARCHAR(500),
-        metric VARCHAR(200),
-        value BIGINT
-    );
-    ``
+        CREATE TABLE hive_stats (
+            ds VARCHAR(16),
+            table_name VARCHAR(500),
+            metric VARCHAR(200),
+            value BIGINT
+        );
 
-    :param table: the source table, in the format ``database.table_name``
+    :param table: the source table, in the format ``database.table_name``. (templated)
     :type table: str
-    :param partition: the source partition
+    :param partition: the source partition. (templated)
     :type partition: dict of {col:value}
     :param extra_exprs: dict of expression to run against the table where
         keys are metric names and values are Presto compatible expressions
@@ -88,8 +91,7 @@ class HiveStatsCollectionOperator(BaseOperator):
     def get_default_exprs(self, col, col_type):
         if col in self.col_blacklist:
             return {}
-        d = {}
-        d[(col, 'non_null')] = "COUNT({col})"
+        d = {(col, 'non_null'): "COUNT({col})"}
         if col_type in ['double', 'int', 'bigint', 'float', 'double']:
             d[(col, 'sum')] = 'SUM({col})'
             d[(col, 'min')] = 'MIN({col})'
@@ -130,13 +132,8 @@ class HiveStatsCollectionOperator(BaseOperator):
         where_clause = [
             "{0} = '{1}'".format(k, v) for k, v in self.partition.items()]
         where_clause = " AND\n        ".join(where_clause)
-        sql = """
-        SELECT
-            {exprs_str}
-        FROM {self.table}
-        WHERE
-            {where_clause};
-        """.format(**locals())
+        sql = "SELECT {exprs_str} FROM {table} WHERE {where_clause};".format(
+            exprs_str=exprs_str, table=self.table, where_clause=where_clause)
 
         hook = PrestoHook(presto_conn_id=self.presto_conn_id)
         self.log.info('Executing SQL check: %s', sql)
@@ -152,19 +149,19 @@ class HiveStatsCollectionOperator(BaseOperator):
         sql = """
         SELECT 1 FROM hive_stats
         WHERE
-            table_name='{self.table}' AND
+            table_name='{table}' AND
             partition_repr='{part_json}' AND
-            dttm='{self.dttm}'
+            dttm='{dttm}'
         LIMIT 1;
-        """.format(**locals())
+        """.format(table=self.table, part_json=part_json, dttm=self.dttm)
         if mysql.get_records(sql):
             sql = """
             DELETE FROM hive_stats
             WHERE
-                table_name='{self.table}' AND
+                table_name='{table}' AND
                 partition_repr='{part_json}' AND
-                dttm='{self.dttm}';
-            """.format(**locals())
+                dttm='{dttm}';
+            """.format(table=self.table, part_json=part_json, dttm=self.dttm)
             mysql.run(sql)
 
         self.log.info("Pivoting and loading cells into the Airflow db")

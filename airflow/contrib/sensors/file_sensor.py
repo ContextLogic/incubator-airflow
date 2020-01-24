@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 
 import os
@@ -30,10 +35,10 @@ class FileSensor(BaseSensorOperator):
 
     :param fs_conn_id: reference to the File (path)
         connection id
-    :type fs_conn_id: string
+    :type fs_conn_id: str
     :param filepath: File or folder name (relative to
         the base path set within the connection)
-    :type fs_conn_id: string
+    :type fs_conn_id: str
     """
     template_fields = ('filepath',)
     ui_color = '#91818a'
@@ -41,7 +46,7 @@ class FileSensor(BaseSensorOperator):
     @apply_defaults
     def __init__(self,
                  filepath,
-                 fs_conn_id='fs_default2',
+                 fs_conn_id='fs_default',
                  *args,
                  **kwargs):
         super(FileSensor, self).__init__(*args, **kwargs)
@@ -51,8 +56,8 @@ class FileSensor(BaseSensorOperator):
     def poke(self, context):
         hook = FSHook(self.fs_conn_id)
         basepath = hook.get_path()
-        full_path = "/".join([basepath, self.filepath])
-        self.log.info('Poking for file {full_path}'.format(**locals()))
+        full_path = os.path.join(basepath, self.filepath)
+        self.log.info('Poking for file %s', full_path)
         try:
             if stat.S_ISDIR(os.stat(full_path).st_mode):
                 for root, dirs, files in os.walk(full_path):

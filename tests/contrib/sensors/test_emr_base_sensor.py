@@ -1,41 +1,52 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import unittest
 
-from airflow import configuration
 from airflow.contrib.sensors.emr_base_sensor import EmrBaseSensor
 from airflow.exceptions import AirflowException
 
 
 class TestEmrBaseSensor(unittest.TestCase):
-    def setUp(self):
-        configuration.load_test_config()
-
-    def test_subclasses_that_implment_required_methods_and_constants_succeed_when_response_is_good(self):
+    def test_subclasses_that_implement_required_methods_and_constants_succeed_when_response_is_good(self):
         class EmrBaseSensorSubclass(EmrBaseSensor):
             NON_TERMINAL_STATES = ['PENDING', 'RUNNING', 'CONTINUE']
             FAILED_STATE = ['FAILED']
 
-            def get_emr_response(self):
+            @staticmethod
+            def get_emr_response():
                 return {
                     'SomeKey': {'State': 'COMPLETED'},
                     'ResponseMetadata': {'HTTPStatusCode': 200}
                 }
 
-            def state_from_response(self, response):
+            @staticmethod
+            def state_from_response(response):
                 return response['SomeKey']['State']
+
+            @staticmethod
+            def failure_message_from_response(response):
+                change_reason = response['Cluster']['Status'].get('StateChangeReason')
+                if change_reason:
+                    return 'for code: {} with message {}'.format(change_reason.get('Code', 'No code'),
+                                                                 change_reason.get('Message', 'Unknown'))
+                return None
 
         operator = EmrBaseSensorSubclass(
             task_id='test_task',
@@ -51,13 +62,15 @@ class TestEmrBaseSensor(unittest.TestCase):
             NON_TERMINAL_STATES = ['PENDING', 'RUNNING', 'CONTINUE']
             FAILED_STATE = ['FAILED']
 
-            def get_emr_response(self):
+            @staticmethod
+            def get_emr_response():
                 return {
                     'SomeKey': {'State': 'PENDING'},
                     'ResponseMetadata': {'HTTPStatusCode': 200}
                 }
 
-            def state_from_response(self, response):
+            @staticmethod
+            def state_from_response(response):
                 return response['SomeKey']['State']
 
         operator = EmrBaseSensorSubclass(
@@ -74,13 +87,15 @@ class TestEmrBaseSensor(unittest.TestCase):
             NON_TERMINAL_STATES = ['PENDING', 'RUNNING', 'CONTINUE']
             FAILED_STATE = ['FAILED']
 
-            def get_emr_response(self):
+            @staticmethod
+            def get_emr_response():
                 return {
                     'SomeKey': {'State': 'COMPLETED'},
                     'ResponseMetadata': {'HTTPStatusCode': 400}
                 }
 
-            def state_from_response(self, response):
+            @staticmethod
+            def state_from_response(response):
                 return response['SomeKey']['State']
 
         operator = EmrBaseSensorSubclass(
@@ -96,15 +111,28 @@ class TestEmrBaseSensor(unittest.TestCase):
         class EmrBaseSensorSubclass(EmrBaseSensor):
             NON_TERMINAL_STATES = ['PENDING', 'RUNNING', 'CONTINUE']
             FAILED_STATE = ['FAILED']
+            EXPECTED_CODE = 'EXPECTED_TEST_FAILURE'
+            EMPTY_CODE = 'No code'
 
-            def get_emr_response(self):
+            @staticmethod
+            def get_emr_response():
                 return {
-                    'SomeKey': {'State': 'FAILED'},
+                    'SomeKey': {'State': 'FAILED',
+                                'StateChangeReason': {'Code': EmrBaseSensorSubclass.EXPECTED_CODE}},
                     'ResponseMetadata': {'HTTPStatusCode': 200}
                 }
 
-            def state_from_response(self, response):
+            @staticmethod
+            def state_from_response(response):
                 return response['SomeKey']['State']
+
+            @staticmethod
+            def failure_message_from_response(response):
+                state_change_reason = response['SomeKey']['StateChangeReason']
+                if state_change_reason:
+                    return 'with code: {}'.format(state_change_reason.get('Code',
+                                                                          EmrBaseSensorSubclass.EMPTY_CODE))
+                return None
 
         operator = EmrBaseSensorSubclass(
             task_id='test_task',
@@ -117,6 +145,8 @@ class TestEmrBaseSensor(unittest.TestCase):
             operator.poke(None)
 
         self.assertIn('EMR job failed', str(context.exception))
+        self.assertIn(EmrBaseSensorSubclass.EXPECTED_CODE, str(context.exception))
+        self.assertNotIn(EmrBaseSensorSubclass.EMPTY_CODE, str(context.exception))
 
 
 if __name__ == '__main__':

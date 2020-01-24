@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 import re
 import sys
@@ -34,13 +39,15 @@ class HdfsSensor(BaseSensorOperator):
     def __init__(self,
                  filepath,
                  hdfs_conn_id='hdfs_default',
-                 ignored_ext=['_COPYING_'],
+                 ignored_ext=None,
                  ignore_copying=True,
                  file_size=None,
                  hook=HDFSHook,
                  *args,
                  **kwargs):
         super(HdfsSensor, self).__init__(*args, **kwargs)
+        if ignored_ext is None:
+            ignored_ext = ['_COPYING_']
         self.filepath = filepath
         self.hdfs_conn_id = hdfs_conn_id
         self.file_size = file_size
@@ -73,26 +80,30 @@ class HdfsSensor(BaseSensorOperator):
         """
         Will filter if instructed to do so the result to remove matching criteria
 
-        :param result: (list) of dicts returned by Snakebite ls
-        :param ignored_ext: (list) of ignored extensions
-        :param ignore_copying: (bool) shall we ignore ?
-        :return: (list) of dicts which were not removed
+        :param result: list of dicts returned by Snakebite ls
+        :type result: list[dict]
+        :param ignored_ext: list of ignored extensions
+        :type ignored_ext: list
+        :param ignore_copying: shall we ignore ?
+        :type ignore_copying: bool
+        :return: list of dicts which were not removed
+        :rtype: list[dict]
         """
         if ignore_copying:
             log = LoggingMixin().log
-            regex_builder = "^.*\.(%s$)$" % '$|'.join(ignored_ext)
-            ignored_extentions_regex = re.compile(regex_builder)
+            regex_builder = r"^.*\.(%s$)$" % '$|'.join(ignored_ext)
+            ignored_extensions_regex = re.compile(regex_builder)
             log.debug(
                 'Filtering result for ignored extensions: %s in files %s',
-                ignored_extentions_regex.pattern, map(lambda x: x['path'], result)
+                ignored_extensions_regex.pattern, map(lambda x: x['path'], result)
             )
-            result = [x for x in result if not ignored_extentions_regex.match(x['path'])]
+            result = [x for x in result if not ignored_extensions_regex.match(x['path'])]
             log.debug('HdfsSensor.poke: after ext filter result is %s', result)
         return result
 
     def poke(self, context):
         sb = self.hook(self.hdfs_conn_id).get_conn()
-        self.log.info('Poking for file {self.filepath}'.format(**locals()))
+        self.log.info('Poking for file %s', self.filepath)
         try:
             # IMOO it's not right here, as there no raise of any kind.
             # if the filepath is let's say '/data/mydirectory',

@@ -1,27 +1,30 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+from airflow.configuration import conf
+from airflow.exceptions import AirflowException
 from airflow.hooks.base_hook import BaseHook
-from airflow import configuration
 
 try:
-    snakebite_imported = True
     from snakebite.client import Client, HAClient, Namenode, AutoConfigClient
+    snakebite_loaded = True
 except ImportError:
-    snakebite_imported = False
-
-from airflow.exceptions import AirflowException
+    snakebite_loaded = False
 
 
 class HDFSHookException(AirflowException):
@@ -33,15 +36,15 @@ class HDFSHook(BaseHook):
     Interact with HDFS. This class is a wrapper around the snakebite library.
 
     :param hdfs_conn_id: Connection id to fetch connection info
-    :type conn_id: string
+    :type hdfs_conn_id: str
     :param proxy_user: effective user for HDFS operations
-    :type proxy_user: string
+    :type proxy_user: str
     :param autoconfig: use snakebite's automatically configured client
     :type autoconfig: bool
     """
     def __init__(self, hdfs_conn_id='hdfs_default', proxy_user=None,
                  autoconfig=False):
-        if not snakebite_imported:
+        if not snakebite_loaded:
             raise ImportError(
                 'This HDFSHook implementation requires snakebite, but '
                 'snakebite is not compatible with Python 3 '
@@ -59,7 +62,7 @@ class HDFSHook(BaseHook):
         # take the first.
         effective_user = self.proxy_user
         autoconfig = self.autoconfig
-        use_sasl = configuration.get('core', 'security') == 'kerberos'
+        use_sasl = conf.get('core', 'security') == 'kerberos'
 
         try:
             connections = self.get_connections(self.hdfs_conn_id)

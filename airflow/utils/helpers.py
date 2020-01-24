@@ -1,42 +1,56 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import errno
+import imp
+import sys
+import warnings
+
 import psutil
 
 from builtins import input
 from past.builtins import basestring
 from datetime import datetime
-import getpass
-import imp
+from functools import reduce
+from collections import Iterable
 import os
 import re
 import signal
 import subprocess
-import sys
-import warnings
 
-from airflow import configuration
+from jinja2 import Template
+
+from airflow.configuration import conf
 from airflow.exceptions import AirflowException
 
 # When killing processes, time to wait after issuing a SIGTERM before issuing a
 # SIGKILL.
-DEFAULT_TIME_TO_WAIT_AFTER_SIGTERM = configuration.getint('core', 'KILLED_TASK_CLEANUP_TIME')
+DEFAULT_TIME_TO_WAIT_AFTER_SIGTERM = conf.getint(
+    'core', 'KILLED_TASK_CLEANUP_TIME'
+)
+
+KEY_REGEX = re.compile(r'^[\w\-\.]+$')
 
 
 def validate_key(k, max_length=250):
@@ -45,10 +59,10 @@ def validate_key(k, max_length=250):
     elif len(k) > max_length:
         raise AirflowException(
             "The key has to be less than {0} characters".format(max_length))
-    elif not re.match(r'^[A-Za-z0-9_\-\.]+$', k):
+    elif not KEY_REGEX.match(k):
         raise AirflowException(
             "The key ({k}) has to be made of alphanumeric characters, dashes, "
-            "dots and underscores exclusively".format(**locals()))
+            "dots and underscores exclusively".format(k=k))
     else:
         return True
 
@@ -69,8 +83,8 @@ def alchemy_to_dict(obj):
 
 
 def ask_yesno(question):
-    yes = set(['yes', 'y'])
-    no = set(['no', 'n'])
+    yes = {'yes', 'y'}
+    no = {'no', 'n'}
 
     done = False
     print(question)
@@ -82,18 +96,6 @@ def ask_yesno(question):
             return False
         else:
             print("Please respond by yes or no.")
-
-
-def is_in(obj, l):
-    """
-    Checks whether an object is one of the item in the list.
-    This is different from ``in`` because ``in`` uses __cmp__ when
-    present. Here we change based on the object itself
-    """
-    for item in l:
-        if item is obj:
-            return True
-    return False
 
 
 def is_container(obj):
@@ -114,6 +116,28 @@ def as_tuple(obj):
         return tuple([obj])
 
 
+def chunks(items, chunk_size):
+    """
+    Yield successive chunks of a given size from a list of items
+    """
+    if chunk_size <= 0:
+        raise ValueError('Chunk size must be a positive integer')
+    for i in range(0, len(items), chunk_size):
+        yield items[i:i + chunk_size]
+
+
+def reduce_in_chunks(fn, iterable, initializer, chunk_size=0):
+    """
+    Reduce the given list of items by splitting it into chunks
+    of the given size and passing each chunk through the reducer
+    """
+    if len(iterable) == 0:
+        return initializer
+    if chunk_size == 0:
+        chunk_size = len(iterable)
+    return reduce(fn, chunks(iterable, chunk_size), initializer)
+
+
 def as_flattened_list(iterable):
     """
     Return an iterable with one level flattened
@@ -125,19 +149,81 @@ def as_flattened_list(iterable):
 
 
 def chain(*tasks):
-    """
+    r"""
     Given a number of tasks, builds a dependency chain.
+    Support mix airflow.models.BaseOperator and List[airflow.models.BaseOperator].
+    If you want to chain between two List[airflow.models.BaseOperator], have to
+    make sure they have same length.
 
-    chain(task_1, task_2, task_3, task_4)
+    chain(t1, [t2, t3], [t4, t5], t6)
 
     is equivalent to
 
-    task_1.set_downstream(task_2)
-    task_2.set_downstream(task_3)
-    task_3.set_downstream(task_4)
+      / -> t2 -> t4 \
+    t1               -> t6
+      \ -> t3 -> t5 /
+
+    t1.set_downstream(t2)
+    t1.set_downstream(t3)
+    t2.set_downstream(t4)
+    t3.set_downstream(t5)
+    t4.set_downstream(t6)
+    t5.set_downstream(t6)
+
+    :param tasks: List of tasks or List[airflow.models.BaseOperator] to set dependencies
+    :type tasks: List[airflow.models.BaseOperator] or airflow.models.BaseOperator
     """
-    for up_task, down_task in zip(tasks[:-1], tasks[1:]):
-        up_task.set_downstream(down_task)
+    from airflow.models import BaseOperator
+
+    for index, up_task in enumerate(tasks[:-1]):
+        down_task = tasks[index + 1]
+        if isinstance(up_task, BaseOperator):
+            up_task.set_downstream(down_task)
+        elif isinstance(down_task, BaseOperator):
+            down_task.set_upstream(up_task)
+        else:
+            if not isinstance(up_task, Iterable) or not isinstance(down_task, Iterable):
+                raise TypeError(
+                    'Chain not supported between instances of {up_type} and {down_type}'.format(
+                        up_type=type(up_task), down_type=type(down_task)))
+            elif len(up_task) != len(down_task):
+                raise AirflowException(
+                    'Chain not supported different length Iterable but get {up_len} and {down_len}'.format(
+                        up_len=len(up_task), down_len=len(down_task)))
+            else:
+                for up, down in zip(up_task, down_task):
+                    up.set_downstream(down)
+
+
+def cross_downstream(from_tasks, to_tasks):
+    r"""
+    Set downstream dependencies for all tasks in from_tasks to all tasks in to_tasks.
+    E.g.: cross_downstream(from_tasks=[t1, t2, t3], to_tasks=[t4, t5, t6])
+    Is equivalent to:
+
+    t1 --> t4
+       \ /
+    t2 -X> t5
+       / \
+    t3 --> t6
+
+    t1.set_downstream(t4)
+    t1.set_downstream(t5)
+    t1.set_downstream(t6)
+    t2.set_downstream(t4)
+    t2.set_downstream(t5)
+    t2.set_downstream(t6)
+    t3.set_downstream(t4)
+    t3.set_downstream(t5)
+    t3.set_downstream(t6)
+
+    :param from_tasks: List of tasks to start from.
+    :type from_tasks: List[airflow.models.BaseOperator]
+    :param to_tasks: List of tasks to set as downstream dependencies.
+    :type to_tasks: List[airflow.models.BaseOperator]
+    """
+    for task in from_tasks:
+        task.set_downstream(to_tasks)
 
 
 def pprinttable(rows):
@@ -183,87 +269,78 @@ def pprinttable(rows):
     return s
 
 
-def kill_using_shell(logger, pid, signal=signal.SIGTERM):
-    try:
-        process = psutil.Process(pid)
-        # Use sudo only when necessary - consider SubDagOperator and SequentialExecutor case.
-        if process.username() != getpass.getuser():
-            args = ["sudo", "kill", "-{}".format(int(signal)), str(pid)]
-        else:
-            args = ["kill", "-{}".format(int(signal)), str(pid)]
-        # PID may not exist and return a non-zero error code
-        logger.error(subprocess.check_output(args, close_fds=True))
-        logger.info("Killed process {} with signal {}".format(pid, signal))
-        return True
-    except psutil.NoSuchProcess as e:
-        logger.warning("Process {} no longer exists".format(pid))
-        return False
-    except subprocess.CalledProcessError as e:
-        logger.warning("Failed to kill process {} with signal {}. Output: {}"
-                       .format(pid, signal, e.output))
-        return False
-
-
-def kill_process_tree(logger, pid, timeout=DEFAULT_TIME_TO_WAIT_AFTER_SIGTERM):
+def reap_process_group(pid, log, sig=signal.SIGTERM,
+                       timeout=DEFAULT_TIME_TO_WAIT_AFTER_SIGTERM):
     """
-    TODO(saguziel): also kill the root process after killing descendants
-  
-    Kills the process's descendants. Kills using the `kill`
-    shell command so that it can change users. Note: killing via PIDs
-    has the potential to the wrong process if the process dies and the
-    PID gets recycled in a narrow time window.
+    Tries really hard to terminate all children (including grandchildren). Will send
+    sig (SIGTERM) to the process group of pid. If any process is alive after timeout
+    a SIGKILL will be send.
 
-    :param logger: logger
-    :type logger: logging.Logger
+    :param log: log handler
+    :param pid: pid to kill
+    :param sig: signal type
+    :param timeout: how much time a process has to terminate
     """
+
+    def on_terminate(p):
+        log.info("Process %s (%s) terminated with exit code %s", p, p.pid, p.returncode)
+
+    if pid == os.getpid():
+        raise RuntimeError("I refuse to kill myself")
+
     try:
-        root_process = psutil.Process(pid)
+        parent = psutil.Process(pid)
     except psutil.NoSuchProcess:
-        logger.warning("PID: {} does not exist".format(pid))
+        # Race condition - the process already exited
         return
 
-    # Check child processes to reduce cases where a child process died but
-    # the PID got reused.
-    descendant_processes = [x for x in root_process.children(recursive=True)
-                            if x.is_running()]
+    children = parent.children(recursive=True)
+    children.append(parent)
 
-    if len(descendant_processes) != 0:
-        logger.info("Terminating descendant processes of {} PID: {}"
-                    .format(root_process.cmdline(),
-                            root_process.pid))
-        temp_processes = descendant_processes[:]
-        for descendant in temp_processes:
-            logger.info("Terminating descendant process {} PID: {}"
-                        .format(descendant.cmdline(), descendant.pid))
-            if not kill_using_shell(logger, descendant.pid, signal.SIGTERM):
-                descendant_processes.remove(descendant)
+    try:
+        pg = os.getpgid(pid)
+    except OSError as err:
+        # Skip if not such process - we experience a race and it just terminated
+        if err.errno == errno.ESRCH:
+            return
+        raise
 
-        logger.info("Waiting up to {}s for processes to exit..."
-                    .format(timeout))
+    log.info("Sending %s to GPID %s", sig, pg)
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except OSError as err:
+        if err.errno == errno.ESRCH:
+            return
+        # If operation not permitted error is thrown due to run_as_user,
+        # use sudo -n(--non-interactive) to kill the process
+        if err.errno == errno.EPERM:
+            subprocess.check_call(["sudo", "-n", "kill", "-" + str(sig), str(os.getpgid(pid))])
+        raise
+
+    gone, alive = psutil.wait_procs(children, timeout=timeout, callback=on_terminate)
+
+    if alive:
+        for p in alive:
+            log.warning("process %s (%s) did not respond to SIGTERM. Trying SIGKILL", p, pid)
+
         try:
-            psutil.wait_procs(descendant_processes, timeout)
-            logger.info("Done waiting")
-        except psutil.TimeoutExpired:
-            logger.warning("Ran out of time while waiting for "
-                           "processes to exit")
-        # Then SIGKILL
-        descendant_processes = [x for x in root_process.children(recursive=True)
-                                if x.is_running()]
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError as err:
+            if err.errno == errno.ESRCH:
+                return
+            raise
 
-        if len(descendant_processes) > 0:
-            temp_processes = descendant_processes[:]
-            for descendant in temp_processes:
-                logger.info("Killing descendant process {} PID: {}"
-                            .format(descendant.cmdline(), descendant.pid))
-                if not kill_using_shell(logger, descendant.pid, signal.SIGKILL):
-                    descendant_processes.remove(descendant)
-                else:
-                    descendant.wait()
-            logger.info("Killed all descendant processes of {} PID: {}"
-                        .format(root_process.cmdline(),
-                                root_process.pid))
+        gone, alive = psutil.wait_procs(alive, timeout=timeout, callback=on_terminate)
+        if alive:
+            for p in alive:
+                log.error("Process %s (%s) could not be killed. Giving up.", p, p.pid)
+
+
+def parse_template_string(template_string):
+    if "{{" in template_string:  # jinja mode
+        return None, Template(template_string)
     else:
-        logger.debug("There are no descendant processes to kill")
+        return template_string, None
 
 
 class AirflowImporter(object):
@@ -286,10 +363,10 @@ class AirflowImporter(object):
         """
         :param parent_module: The string package name of the parent module. For
             example, 'airflow.operators'
-        :type parent_module: string
+        :type parent_module: str
         :param module_attributes: The file to class mappings for all importable
             classes.
-        :type module_attributes: string
+        :type module_attributes: str
         """
         self._parent_module = parent_module
         self._attribute_modules = self._build_attribute_modules(module_attributes)
@@ -343,11 +420,11 @@ class AirflowImporter(object):
             # This functionality is deprecated, and AirflowImporter should be
             # removed in 2.0.
             warnings.warn(
-                "Importing {i} directly from {m} has been "
+                "Importing '{i}' directly from '{m}' has been "
                 "deprecated. Please import from "
                 "'{m}.[operator_module]' instead. Support for direct "
                 "imports will be dropped entirely in Airflow 2.0.".format(
-                    i=attribute, m=self._parent_module),
+                    i=attribute, m=self._parent_module.__name__),
                 DeprecationWarning)
 
         loaded_module = self._loaded_modules[module]
@@ -379,3 +456,27 @@ class AirflowImporter(object):
             return loaded_attribute
 
         raise AttributeError
+
+
+def render_log_filename(ti, try_number, filename_template):
+    """
+    Given task instance, try_number, filename_template, return the rendered log filename
+
+    :param ti: task instance
+    :param try_number: try_number of the task
+    :param filename_template: filename template, which can be jinja template or python string template
+    """
+    filename_template, filename_jinja_template = parse_template_string(filename_template)
+    if filename_jinja_template:
+        jinja_context = ti.get_template_context()
+        jinja_context['try_number'] = try_number
+        return filename_jinja_template.render(**jinja_context)
+
+    return filename_template.format(dag_id=ti.dag_id,
+                                    task_id=ti.task_id,
+                                    execution_date=ti.execution_date.isoformat(),
+                                    try_number=try_number)
+
+
+def convert_camel_to_snake(camel_str):
+    return re.sub('(?!^)([A-Z]+)', r'_\1', camel_str).lower()

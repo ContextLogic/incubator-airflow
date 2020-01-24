@@ -1,42 +1,60 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
+# flake8: noqa: E402
+import inspect
 from future import standard_library
-standard_library.install_aliases()
-from builtins import str
-from builtins import object
+standard_library.install_aliases()  # noqa: E402
+from builtins import str, object
 
-from cgi import escape
 from io import BytesIO as IO
 import functools
 import gzip
+import io
 import json
+import os
+import re
 import time
-
-from flask import after_this_request, request, Response
-from flask_admin.contrib.sqla.filters import FilterConverter
-from flask_admin.model import filters
-from flask_login import current_user
 import wtforms
 from wtforms.compat import text_type
+import zipfile
 
-from airflow import configuration, models, settings
+from flask import after_this_request, request, Markup, Response
+from flask_admin.model import filters
+import flask_admin.contrib.sqla.filters as sqlafilters
+from flask_login import current_user
+from six.moves.urllib.parse import urlencode
+
+from airflow import models, settings
+from airflow.configuration import conf
 from airflow.utils.db import create_session
 from airflow.utils import timezone
 from airflow.utils.json import AirflowJsonEncoder
 
-AUTHENTICATE = configuration.getboolean('webserver', 'AUTHENTICATE')
+try:
+    # cgi.escape has been deprecated since 3.3 and removed in 3.8
+    from html import escape
+except ImportError:
+    # Use cgi.escape for Python 2
+    from cgi import escape  # type: ignore
+
+AUTHENTICATE = conf.getboolean('webserver', 'AUTHENTICATE')
 
 DEFAULT_SENSITIVE_VARIABLE_FIELDS = (
     'password',
@@ -50,16 +68,21 @@ DEFAULT_SENSITIVE_VARIABLE_FIELDS = (
 
 
 def should_hide_value_for_key(key_name):
-    return any(s in key_name.lower() for s in DEFAULT_SENSITIVE_VARIABLE_FIELDS) \
-           and configuration.getboolean('admin', 'hide_sensitive_variable_fields')
+    # It is possible via importing variables from file that a key is empty.
+    if key_name:
+        config_set = conf.getboolean('admin',
+                                                   'hide_sensitive_variable_fields')
+        field_comp = any(s in key_name.lower() for s in DEFAULT_SENSITIVE_VARIABLE_FIELDS)
+        return config_set and field_comp
+    return False
 
 
 class LoginMixin(object):
     def is_accessible(self):
         return (
             not AUTHENTICATE or (
-                not current_user.is_anonymous() and
-                current_user.is_authenticated()
+                not current_user.is_anonymous and
+                current_user.is_authenticated
             )
         )
 
@@ -68,7 +91,7 @@ class SuperUserMixin(object):
     def is_accessible(self):
         return (
             not AUTHENTICATE or
-            (not current_user.is_anonymous() and current_user.is_superuser())
+            (not current_user.is_anonymous and current_user.is_superuser())
         )
 
 
@@ -76,22 +99,29 @@ class DataProfilingMixin(object):
     def is_accessible(self):
         return (
             not AUTHENTICATE or
-            (not current_user.is_anonymous() and current_user.data_profiling())
+            (not current_user.is_anonymous and current_user.data_profiling())
         )
 
 
 def get_params(**kwargs):
-    params = []
-    for k, v in kwargs.items():
-        if k == 'showPaused':
-            # True is default or None
-            if v or v is None:
-                continue
-            params.append('{}={}'.format(k, v))
-        elif v:
-            params.append('{}={}'.format(k, v))
-    params = sorted(params, key=lambda x: x.split('=')[0])
-    return '&'.join(params)
+    hide_paused_dags_by_default = conf.getboolean('webserver',
+                                                  'hide_paused_dags_by_default')
+    if 'showPaused' in kwargs:
+        show_paused_dags_url_param = kwargs['showPaused']
+        if _should_remove_show_paused_from_url_params(
+            show_paused_dags_url_param,
+            hide_paused_dags_by_default
+        ):
+            kwargs.pop('showPaused')
+    return urlencode({d: v if v is not None else '' for d, v in kwargs.items()})
+
+
+def _should_remove_show_paused_from_url_params(show_paused_dags_url_param,
+                                               hide_paused_dags_by_default):
+    return any([
+        show_paused_dags_url_param != hide_paused_dags_by_default,
+        show_paused_dags_url_param is None
+    ])
 
 
 def generate_pages(current_page, num_of_pages,
@@ -122,27 +152,27 @@ def generate_pages(current_page, num_of_pages,
     """
 
     void_link = 'javascript:void(0)'
-    first_node = """<li class="paginate_button {disabled}" id="dags_first">
+    first_node = Markup("""<li class="paginate_button {disabled}" id="dags_first">
     <a href="{href_link}" aria-controls="dags" data-dt-idx="0" tabindex="0">&laquo;</a>
-</li>"""
+</li>""")
 
-    previous_node = """<li class="paginate_button previous {disabled}" id="dags_previous">
-    <a href="{href_link}" aria-controls="dags" data-dt-idx="0" tabindex="0">&lt;</a>
-</li>"""
+    previous_node = Markup("""<li class="paginate_button previous {disabled}" id="dags_previous">
+    <a href="{href_link}" aria-controls="dags" data-dt-idx="0" tabindex="0">&lsaquo;</a>
+</li>""")
 
-    next_node = """<li class="paginate_button next {disabled}" id="dags_next">
-    <a href="{href_link}" aria-controls="dags" data-dt-idx="3" tabindex="0">&gt;</a>
-</li>"""
+    next_node = Markup("""<li class="paginate_button next {disabled}" id="dags_next">
+    <a href="{href_link}" aria-controls="dags" data-dt-idx="3" tabindex="0">&rsaquo;</a>
+</li>""")
 
-    last_node = """<li class="paginate_button {disabled}" id="dags_last">
+    last_node = Markup("""<li class="paginate_button {disabled}" id="dags_last">
     <a href="{href_link}" aria-controls="dags" data-dt-idx="3" tabindex="0">&raquo;</a>
-</li>"""
+</li>""")
 
-    page_node = """<li class="paginate_button {is_active}">
+    page_node = Markup("""<li class="paginate_button {is_active}">
     <a href="{href_link}" aria-controls="dags" data-dt-idx="2" tabindex="0">{page_num}</a>
-</li>"""
+</li>""")
 
-    output = ['<ul class="pagination" style="margin-top:0px;">']
+    output = [Markup('<ul class="pagination" style="margin-top:0px;">')]
 
     is_disabled = 'disabled' if current_page <= 0 else ''
     output.append(first_node.format(href_link="?{}"
@@ -198,9 +228,9 @@ def generate_pages(current_page, num_of_pages,
                                                       showPaused=showPaused)),
                                    disabled=is_disabled))
 
-    output.append('</ul>')
+    output.append(Markup('</ul>'))
 
-    return wtforms.widgets.core.HTMLString('\n'.join(output))
+    return Markup('\n'.join(output))
 
 
 def limit_sql(sql, limit, conn_type):
@@ -212,21 +242,21 @@ def limit_sql(sql, limit, conn_type):
             SELECT TOP {limit} * FROM (
             {sql}
             ) qry
-            """.format(**locals())
+            """.format(limit=limit, sql=sql)
         elif conn_type in ['oracle']:
             sql = """\
             SELECT * FROM (
             {sql}
             ) qry
             WHERE ROWNUM <= {limit}
-            """.format(**locals())
+            """.format(limit=limit, sql=sql)
         else:
             sql = """\
             SELECT * FROM (
             {sql}
             ) qry
             LIMIT {limit}
-            """.format(**locals())
+            """.format(limit=limit, sql=sql)
     return sql
 
 
@@ -236,13 +266,14 @@ def epoch(dttm):
 
 
 def action_logging(f):
-    '''
+    """
     Decorator to log user actions
-    '''
+    """
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
-        if current_user and hasattr(current_user, 'username'):
-            user = current_user.username
+        # AnonymousUserMixin() has user attribute but its value is None.
+        if current_user and hasattr(current_user, 'user') and current_user.user:
+            user = current_user.user.username
         else:
             user = 'anonymous'
 
@@ -250,12 +281,12 @@ def action_logging(f):
             event=f.__name__,
             task_instance=None,
             owner=user,
-            extra=str(list(request.args.items())),
-            task_id=request.args.get('task_id'),
-            dag_id=request.args.get('dag_id'))
+            extra=str(list(request.values.items())),
+            task_id=request.values.get('task_id'),
+            dag_id=request.values.get('dag_id'))
 
-        if 'execution_date' in request.args:
-            log.execution_date = timezone.parse(request.args.get('execution_date'))
+        if request.values.get('execution_date'):
+            log.execution_date = timezone.parse(request.values.get('execution_date'))
 
         with create_session() as session:
             session.add(log)
@@ -267,9 +298,9 @@ def action_logging(f):
 
 
 def notify_owner(f):
-    '''
+    """
     Decorator to notify owner of actions taken on their DAGs by others
-    '''
+    """
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         """
@@ -280,7 +311,7 @@ def notify_owner(f):
             dag = dagbag.get_dag(dag_id)
             task = dag.get_task(task_id)
 
-            if current_user and hasattr(current_user, 'username'):
+            if current_user and hasattr(current_user, 'user') and current_user.user:
                 user = current_user.username
             else:
                 user = 'anonymous'
@@ -324,9 +355,9 @@ def json_response(obj):
 
 
 def gzipped(f):
-    '''
+    """
     Decorator to make a view compressed
-    '''
+    """
     @functools.wraps(f)
     def view_func(*args, **kwargs):
         @after_this_request
@@ -360,13 +391,58 @@ def gzipped(f):
     return view_func
 
 
+ZIP_REGEX = re.compile(r'((.*\.zip){})?(.*)'.format(re.escape(os.sep)))
+
+
+def open_maybe_zipped(f, mode='r'):
+    """
+    Opens the given file. If the path contains a folder with a .zip suffix, then
+    the folder is treated as a zip archive, opening the file inside the archive.
+
+    :return: a file object, as in `open`, or as in `ZipFile.open`.
+    """
+
+    _, archive, filename = ZIP_REGEX.search(f).groups()
+    if archive and zipfile.is_zipfile(archive):
+        return zipfile.ZipFile(archive, mode=mode).open(filename)
+    else:
+        return io.open(f, mode=mode)
+
+
 def make_cache_key(*args, **kwargs):
-    '''
+    """
     Used by cache to get a unique key per URL
-    '''
+    """
     path = request.path
     args = str(hash(frozenset(request.args.items())))
     return (path + args).encode('ascii', 'ignore')
+
+
+def get_python_source(x):
+    """
+    Helper function to get Python source (or not), preventing exceptions
+    """
+    source_code = None
+
+    if isinstance(x, functools.partial):
+        source_code = inspect.getsource(x.func)
+
+    if source_code is None:
+        try:
+            source_code = inspect.getsource(x)
+        except TypeError:
+            pass
+
+    if source_code is None:
+        try:
+            source_code = inspect.getsource(x.__call__)
+        except (TypeError, AttributeError):
+            pass
+
+    if source_code is None:
+        source_code = 'No source code available for {}'.format(type(x))
+
+    return source_code
 
 
 class AceEditorWidget(wtforms.widgets.TextArea):
@@ -389,7 +465,45 @@ class AceEditorWidget(wtforms.widgets.TextArea):
         return wtforms.widgets.core.HTMLString(html)
 
 
-class UtcFilterConverter(FilterConverter):
+class UtcDateTimeFilterMixin(object):
+    def clean(self, value):
+        dt = super(UtcDateTimeFilterMixin, self).clean(value)
+        if isinstance(dt, list):
+            return [timezone.make_aware(d, timezone=timezone.utc) for d in dt]
+        return timezone.make_aware(dt, timezone=timezone.utc)
+
+
+class UtcDateTimeEqualFilter(UtcDateTimeFilterMixin, sqlafilters.DateTimeEqualFilter):
+    pass
+
+
+class UtcDateTimeNotEqualFilter(UtcDateTimeFilterMixin, sqlafilters.DateTimeNotEqualFilter):
+    pass
+
+
+class UtcDateTimeGreaterFilter(UtcDateTimeFilterMixin, sqlafilters.DateTimeGreaterFilter):
+    pass
+
+
+class UtcDateTimeSmallerFilter(UtcDateTimeFilterMixin, sqlafilters.DateTimeSmallerFilter):
+    pass
+
+
+class UtcDateTimeBetweenFilter(UtcDateTimeFilterMixin, sqlafilters.DateTimeBetweenFilter):
+    pass
+
+
+class UtcDateTimeNotBetweenFilter(UtcDateTimeFilterMixin, sqlafilters.DateTimeNotBetweenFilter):
+    pass
+
+
+class UtcFilterConverter(sqlafilters.FilterConverter):
+
+    utcdatetime_filters = (UtcDateTimeEqualFilter, UtcDateTimeNotEqualFilter,
+                           UtcDateTimeGreaterFilter, UtcDateTimeSmallerFilter,
+                           UtcDateTimeBetweenFilter, UtcDateTimeNotBetweenFilter,
+                           sqlafilters.FilterEmpty)
+
     @filters.convert('utcdatetime')
     def conv_utcdatetime(self, column, name, **kwargs):
-        return self.conv_datetime(column, name, **kwargs)
+        return [f(column, name, **kwargs) for f in self.utcdatetime_filters]

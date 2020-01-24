@@ -1,36 +1,32 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 import unittest
 
 import requests
 from mock import patch
 
-from airflow import DAG, configuration
+from airflow import DAG
 from airflow.exceptions import AirflowException, AirflowSensorTimeout
 from airflow.operators.http_operator import SimpleHttpOperator
 from airflow.sensors.http_sensor import HttpSensor
 from airflow.utils.timezone import datetime
-
-try:
-    from unittest import mock
-except ImportError:
-    try:
-        import mock
-    except ImportError:
-        mock = None
-
-configuration.load_test_config()
+from tests.compat import mock
 
 DEFAULT_DATE = datetime(2015, 1, 1)
 DEFAULT_DATE_ISO = DEFAULT_DATE.isoformat()
@@ -39,7 +35,6 @@ TEST_DAG_ID = 'unit_test_dag'
 
 class HttpSensorTests(unittest.TestCase):
     def setUp(self):
-        configuration.load_test_config()
         args = {
             'owner': 'airflow',
             'start_date': DEFAULT_DATE
@@ -135,7 +130,7 @@ class FakeSession(object):
     def __init__(self):
         self.response = requests.Response()
         self.response.status_code = 200
-        self.response._content = 'airbnb/airflow'.encode('ascii', 'ignore')
+        self.response._content = 'apache/airflow'.encode('ascii', 'ignore')
 
     def send(self, request, **kwargs):
         return self.response
@@ -150,7 +145,6 @@ class FakeSession(object):
 
 class HttpOpSensorTest(unittest.TestCase):
     def setUp(self):
-        configuration.load_test_config()
         args = {'owner': 'airflow', 'start_date': DEFAULT_DATE_ISO}
         dag = DAG(TEST_DAG_ID, default_args=args)
         self.dag = dag
@@ -173,7 +167,7 @@ class HttpOpSensorTest(unittest.TestCase):
             method='GET',
             endpoint='/search',
             data={"client": "ubuntu", "q": "airflow"},
-            response_check=lambda response: ("airbnb/airflow" in response.text),
+            response_check=lambda response: ("apache/airflow" in response.text),
             headers={},
             dag=self.dag)
         t.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
@@ -187,7 +181,7 @@ class HttpOpSensorTest(unittest.TestCase):
             request_params={"client": "ubuntu", "q": "airflow", 'date': '{{ds}}'},
             headers={},
             response_check=lambda response: (
-                "airbnb/airflow/" + DEFAULT_DATE.strftime('%Y-%m-%d')
+                "apache/airflow/" + DEFAULT_DATE.strftime('%Y-%m-%d')
                 in response.text),
             poke_interval=5,
             timeout=15,

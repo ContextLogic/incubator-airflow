@@ -1,23 +1,31 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 import sys
+import re
+from datetime import datetime
 
 from airflow.exceptions import AirflowException
 from airflow.models import BaseOperator
 from airflow.utils import apply_defaults
 
 from airflow.contrib.hooks.aws_hook import AwsHook
+from airflow.contrib.hooks.aws_logs_hook import AwsLogsHook
 
 
 class ECSOperator(BaseOperator):
@@ -28,13 +36,42 @@ class ECSOperator(BaseOperator):
     :type task_definition: str
     :param cluster: the cluster name on EC2 Container Service
     :type cluster: str
-    :param: overrides: the same parameter that boto3 will receive:
-            http://boto3.readthedocs.org/en/latest/reference/services/ecs.html#ECS.Client.run_task
-    :type: overrides: dict
+    :param overrides: the same parameter that boto3 will receive (templated):
+        http://boto3.readthedocs.org/en/latest/reference/services/ecs.html#ECS.Client.run_task
+    :type overrides: dict
     :param aws_conn_id: connection id of AWS credentials / region name. If None,
-            credential boto3 strategy will be used (http://boto3.readthedocs.io/en/latest/guide/configuration.html).
+        credential boto3 strategy will be used
+        (http://boto3.readthedocs.io/en/latest/guide/configuration.html).
     :type aws_conn_id: str
-    :param region_name: region name to use in AWS Hook. Override the region_name in connection (if provided)
+    :param region_name: region name to use in AWS Hook.
+        Override the region_name in connection (if provided)
+    :type region_name: str
+    :param launch_type: the launch type on which to run your task ('EC2' or 'FARGATE')
+    :type launch_type: str
+    :param group: the name of the task group associated with the task
+    :type group: str
+    :param placement_constraints: an array of placement constraint objects to use for
+        the task
+    :type placement_constraints: list
+    :param platform_version: the platform version on which your task is running
+    :type platform_version: str
+    :param network_configuration: the network configuration for the task
+    :type network_configuration: dict
+    :param tags: a dictionary of tags in the form of {'tagKey': 'tagValue'}.
+    :type tags: dict
+    :param awslogs_group: the CloudWatch group where your ECS container logs are stored.
+        Only required if you want logs to be shown in the Airflow UI after your job has
+        finished.
+    :type awslogs_group: str
+    :param awslogs_region: the region in which your CloudWatch logs are stored.
+        If None, this is the same as the `region_name` parameter. If that is also None,
+        this is the default AWS region based on your connection settings.
+    :type awslogs_region: str
+    :param awslogs_stream_prefix: the stream prefix that is used for the CloudWatch logs.
+        This is usually based on some custom name combined with the name of the container.
+        Only required if you want logs to be shown in the Airflow UI after your job has
+        finished.
+    :type awslogs_stream_prefix: str
     """
 
     ui_color = '#f0ede4'
@@ -44,7 +81,10 @@ class ECSOperator(BaseOperator):
 
     @apply_defaults
     def __init__(self, task_definition, cluster, overrides,
-                 aws_conn_id=None, region_name=None, **kwargs):
+                 aws_conn_id=None, region_name=None, launch_type='EC2',
+                 group=None, placement_constraints=None, platform_version='LATEST',
+                 network_configuration=None, tags=None, awslogs_group=None,
+                 awslogs_region=None, awslogs_stream_prefix=None, **kwargs):
         super(ECSOperator, self).__init__(**kwargs)
 
         self.aws_conn_id = aws_conn_id
@@ -52,13 +92,26 @@ class ECSOperator(BaseOperator):
         self.task_definition = task_definition
         self.cluster = cluster
         self.overrides = overrides
+        self.launch_type = launch_type
+        self.group = group
+        self.placement_constraints = placement_constraints
+        self.platform_version = platform_version
+        self.network_configuration = network_configuration
+
+        self.tags = tags
+        self.awslogs_group = awslogs_group
+        self.awslogs_stream_prefix = awslogs_stream_prefix
+        self.awslogs_region = awslogs_region
+
+        if self.awslogs_region is None:
+            self.awslogs_region = region_name
 
         self.hook = self.get_hook()
 
     def execute(self, context):
         self.log.info(
             'Running ECS Task - Task definition: %s - on cluster %s',
-            self.task_definition,self.cluster
+            self.task_definition, self.cluster
         )
         self.log.info('ECSOperator overrides: %s', self.overrides)
 
@@ -67,12 +120,26 @@ class ECSOperator(BaseOperator):
             region_name=self.region_name
         )
 
-        response = self.client.run_task(
-            cluster=self.cluster,
-            taskDefinition=self.task_definition,
-            overrides=self.overrides,
-            startedBy=self.owner
-        )
+        run_opts = {
+            'cluster': self.cluster,
+            'taskDefinition': self.task_definition,
+            'overrides': self.overrides,
+            'startedBy': self.owner,
+            'launchType': self.launch_type,
+        }
+
+        if self.launch_type == 'FARGATE':
+            run_opts['platformVersion'] = self.platform_version
+        if self.group is not None:
+            run_opts['group'] = self.group
+        if self.placement_constraints is not None:
+            run_opts['placementConstraints'] = self.placement_constraints
+        if self.network_configuration is not None:
+            run_opts['networkConfiguration'] = self.network_configuration
+        if self.tags is not None:
+            run_opts['tags'] = [{'key': k, 'value': v} for (k, v) in self.tags.items()]
+
+        response = self.client.run_task(**run_opts)
 
         failures = response['failures']
         if len(failures) > 0:
@@ -100,23 +167,50 @@ class ECSOperator(BaseOperator):
         )
         self.log.info('ECS Task stopped, check status: %s', response)
 
+        # Get logs from CloudWatch if the awslogs log driver was used
+        if self.awslogs_group and self.awslogs_stream_prefix:
+            self.log.info('ECS Task logs output:')
+            task_id = self.arn.split("/")[-1]
+            stream_name = "{}/{}".format(self.awslogs_stream_prefix, task_id)
+            for event in self.get_logs_hook().get_log_events(self.awslogs_group, stream_name):
+                dt = datetime.fromtimestamp(event['timestamp'] / 1000.0)
+                self.log.info("[{}] {}".format(dt.isoformat(), event['message']))
+
         if len(response.get('failures', [])) > 0:
             raise AirflowException(response)
 
         for task in response['tasks']:
+            # This is a `stoppedReason` that indicates a task has not
+            # successfully finished, but there is no other indication of failure
+            # in the response.
+            # See, https://docs.aws.amazon.com/AmazonECS/latest/developerguide/stopped-task-errors.html # noqa E501
+            if re.match(r'Host EC2 \(instance .+?\) (stopped|terminated)\.',
+                        task.get('stoppedReason', '')):
+                raise AirflowException(
+                    'The task was stopped because the host instance terminated: {}'.
+                    format(task.get('stoppedReason', '')))
             containers = task['containers']
             for container in containers:
-                if container.get('lastStatus') == 'STOPPED' and container['exitCode'] != 0:
-                    raise AirflowException('This task is not in success state {}'.format(task))
+                if container.get('lastStatus') == 'STOPPED' and \
+                        container['exitCode'] != 0:
+                    raise AirflowException(
+                        'This task is not in success state {}'.format(task))
                 elif container.get('lastStatus') == 'PENDING':
                     raise AirflowException('This task is still pending {}'.format(task))
                 elif 'error' in container.get('reason', '').lower():
-                    raise AirflowException('This containers encounter an error during launching : {}'.
-                                           format(container.get('reason', '').lower()))
+                    raise AirflowException(
+                        'This containers encounter an error during launching : {}'.
+                        format(container.get('reason', '').lower()))
 
     def get_hook(self):
         return AwsHook(
             aws_conn_id=self.aws_conn_id
+        )
+
+    def get_logs_hook(self):
+        return AwsLogsHook(
+            aws_conn_id=self.aws_conn_id,
+            region_name=self.awslogs_region
         )
 
     def on_kill(self):
