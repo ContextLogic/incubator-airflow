@@ -26,3 +26,4 @@ upload_egg:
     - twine upload --repository-url $PYPI_SERVER --username $USERNAME --password $PASSWORD dist/*
   only:
     - master
+    - 1106
