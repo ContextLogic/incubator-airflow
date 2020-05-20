@@ -885,25 +885,26 @@ class Airflow(AirflowBaseView):
     @has_access
     @action_logging
     def delete(self):
-        from airflow.api.common.experimental import delete_dag
-        from airflow.exceptions import DagNotFound, DagFileExists
+        #from airflow.api.common.experimental import delete_dag
+        #from airflow.exceptions import DagNotFound, DagFileExists
 
-        dag_id = request.values.get('dag_id')
+        #dag_id = request.values.get('dag_id')
         origin = request.values.get('origin') or url_for('Airflow.index')
 
-        try:
-            delete_dag.delete_dag(dag_id)
-        except DagNotFound:
-            flash("DAG with id {} not found. Cannot delete".format(dag_id), 'error')
-            return redirect(request.referrer)
-        except DagFileExists:
-            flash("Dag id {} is still in DagBag. "
-                  "Remove the DAG file first.".format(dag_id),
-                  'error')
-            return redirect(request.referrer)
+        #try:
+        #    delete_dag.delete_dag(dag_id)
+        #except DagNotFound:
+        #    flash("DAG with id {} not found. Cannot delete".format(dag_id), 'error')
+        #    return redirect(request.referrer)
+        #except DagFileExists:
+        #    flash("Dag id {} is still in DagBag. "
+        #          "Remove the DAG file first.".format(dag_id),
+        #          'error')
+        #    return redirect(request.referrer)
 
-        flash("Deleting DAG with id {}. May take a couple minutes to fully"
-              " disappear.".format(dag_id))
+        flash("Dag deletion disabled.")
+        #flash("Deleting DAG with id {}. May take a couple minutes to fully"
+        #      " disappear.".format(dag_id))
 
         # Upon success return to origin.
         return redirect(origin)
@@ -914,34 +915,35 @@ class Airflow(AirflowBaseView):
     @action_logging
     @provide_session
     def trigger(self, session=None):
-        dag_id = request.values.get('dag_id')
+        #dag_id = request.values.get('dag_id')
         origin = request.values.get('origin') or url_for('Airflow.index')
-        dag = session.query(models.DagModel).filter(models.DagModel.dag_id == dag_id).first()
-        if not dag:
-            flash("Cannot find dag {}".format(dag_id))
-            return redirect(origin)
+        #dag = session.query(models.DagModel).filter(models.DagModel.dag_id == dag_id).first()
+        #if not dag:
+        #    flash("Cannot find dag {}".format(dag_id))
+        #    return redirect(origin)
 
-        execution_date = timezone.utcnow()
-        run_id = "manual__{0}".format(execution_date.isoformat())
+        #execution_date = timezone.utcnow()
+        #run_id = "manual__{0}".format(execution_date.isoformat())
 
-        dr = DagRun.find(dag_id=dag_id, run_id=run_id)
-        if dr:
-            flash("This run_id {} already exists".format(run_id))
-            return redirect(origin)
+        #dr = DagRun.find(dag_id=dag_id, run_id=run_id)
+        #if dr:
+        #    flash("This run_id {} already exists".format(run_id))
+        #    return redirect(origin)
 
-        run_conf = {}
+        #run_conf = {}
 
-        dag.create_dagrun(
-            run_id=run_id,
-            execution_date=execution_date,
-            state=State.RUNNING,
-            conf=run_conf,
-            external_trigger=True
-        )
+        #dag.create_dagrun(
+        #    run_id=run_id,
+        #    execution_date=execution_date,
+        #    state=State.RUNNING,
+        #    conf=run_conf,
+        #    external_trigger=True
+        #)
 
-        flash(
-            "Triggered {}, "
-            "it should start any moment now.".format(dag_id))
+        flash("Manual trigger disabled.")
+        #flash(
+        #    "Triggered {}, "
+        #    "it should start any moment now.".format(dag_id))
         return redirect(origin)
 
     def _clear_dag_tis(self, dag, start_date, end_date, origin,
