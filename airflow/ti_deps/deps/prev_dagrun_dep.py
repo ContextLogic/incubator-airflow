@@ -44,6 +44,11 @@ class PrevDagrunDep(BaseTIDep):
                 reason="The task did not have depends_on_past set.")
             return
 
+        if ti.task.depends_on_past:
+            yield self._passing_status(
+                reason="Temporarily allowed")
+            return
+
         # Don't depend on the previous task instance if we are the first task
         dag = ti.task.dag
         if dag.catchup:
