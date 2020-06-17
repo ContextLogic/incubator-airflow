@@ -63,7 +63,7 @@ class BaseSensorOperator(BaseOperator, SkipMixin):
     @apply_defaults
     def __init__(self,
                  poke_interval=60,
-                 timeout=60 * 60 * 3,
+                 timeout=60 * 60 * 6,
                  soft_fail=False,
                  mode='poke',
                  *args,
